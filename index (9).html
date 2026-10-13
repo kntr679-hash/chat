@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>オンラインチャット</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<style>
+  :root {
+    --bg: #f3f5f2; --panel: #ffffff; --ink: #1d2623; --sub: #6b7872;
+    --line: #dde3df; --accent: #1f7a5c; --accent-ink: #ffffff; --mine: #d9efe6; --theirs: #eef0ee;
+    --dot: #2bb673;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141918; --panel: #1c2321; --ink: #e6ece9; --sub: #8fa098;
+      --line: #2c3633; --accent: #3fc08f; --accent-ink: #0f1a16; --mine: #234a3c; --theirs: #263130;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", system-ui, sans-serif;
+    padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  button, input { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #login { display: grid; place-items: center; height: 100%; padding: 16px; }
+  #login form, .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px; width: min(360px, 100%); }
+  #login h1 { font-size: 20px; margin: 0 0 4px; }
+  #login p { color: var(--sub); margin: 0 0 16px; font-size: 14px; }
+  #login input { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); margin-bottom: 12px; }
+  .primary { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 10px 16px; cursor: pointer; width: 100%; }
+
+  #app { display: none; height: 100%; grid-template-columns: 260px 1fr; }
+  #side { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  #side header { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  #side header b { display: block; font-size: 15px; }
+  #status { font-size: 12px; color: var(--sub); }
+  #list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; flex: 1; }
+  #list li button {
+    width: 100%; text-align: left; background: none; border: 0; border-radius: 8px;
+    padding: 10px 12px; display: flex; align-items: center; gap: 10px; cursor: pointer;
+  }
+  #list li button:hover { background: var(--bg); }
+  #list li button[aria-current="true"] { background: var(--mine); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dot); flex: none; }
+  .badge { margin-left: auto; background: var(--accent); color: var(--accent-ink); border-radius: 999px; font-size: 12px; padding: 1px 7px; }
+  #empty { color: var(--sub); font-size: 14px; padding: 16px; }
+
+  #main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  #main header { padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--panel); display: flex; align-items: center; gap: 10px; }
+  #back { display: none; background: none; border: 0; cursor: pointer; font-size: 18px; padding: 0 6px 0 0; }
+  #msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .hint { margin: auto; color: var(--sub); font-size: 14px; text-align: center; }
+  .m { max-width: min(75%, 520px); padding: 8px 12px; border-radius: 12px; background: var(--theirs); overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.5; }
+  .m.mine { align-self: flex-end; background: var(--mine); }
+  .note { align-self: center; color: var(--sub); font-size: 12px; }
+  #send { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); background: var(--panel); }
+  #send input { flex: 1; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); min-width: 0; }
+  #send button { width: auto; }
+  #send :disabled { opacity: .5; cursor: not-allowed; }
+
+  @media (max-width: 640px) {
+    #app { grid-template-columns: 1fr; }
+    #app[data-view="chat"] #side { display: none; }
+    #app[data-view="list"] #main { display: none; }
+    #back { display: block; }
+  }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <form id="loginForm">
+    <h1>オンラインチャット</h1>
+    <p>このページを開いている人と話せます。名前を入れてね。</p>
+    <input id="nameInput" maxlength="20" placeholder="名前" required autocomplete="nickname">
+    <button class="primary" type="submit">入る</button>
+  </form>
+</div>
+
+<div id="app" data-view="list">
+  <aside id="side">
+    <header>
+      <b id="me"></b>
+      <span id="status">接続中…</span>
+    </header>
+    <ul id="list"></ul>
+    <p id="empty">いまオンラインの人はいません。別のタブやスマホで開くと表示されます。</p>
+  </aside>
+  <section id="main">
+    <header>
+      <button id="back" aria-label="一覧に戻る">←</button>
+      <b id="peerName">相手を選んでください</b>
+    </header>
+    <div id="msgs"><p class="hint">左の一覧から、話したい人をクリック</p></div>
+    <form id="send">
+      <input id="text" maxlength="1000" placeholder="メッセージ" autocomplete="off" disabled>
+      <button class="primary" type="submit" disabled>送信</button>
+    </form>
+  </section>
+</div>
+
+<script>
+// ===== 設定: Supabase の Project Settings → API からコピー =====
+const SUPABASE_URL = "https://YOUR_PROJECT_ID.supabase.co";
+const SUPABASE_KEY = "YOUR_ANON_PUBLIC_KEY";
+// =============================================================
+
+const $ = (id) => document.getElementById(id);
+const myId = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
+let myName = "";
+let channel = null;
+let peers = {};          // id -> name(いまオンラインの人)
+let current = null;      // 開いている相手の id
+const logs = {};         // id -> [{mine, text} | {note}]
+const names = {};        // id -> 最後に見た名前
+const unread = {};       // id -> 件数
+
+try { $("nameInput").value = localStorage.getItem("chat-name") || ""; } catch (e) {}
+
+$("loginForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  myName = $("nameInput").value.trim();
+  if (!myName) return;
+  try { localStorage.setItem("chat-name", myName); } catch (e) {}
+  $("login").style.display = "none";
+  $("app").style.display = "grid";
+  $("me").textContent = myName;
+  connect();
+});
+
+function connect() {
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  channel = sb.channel("lobby", {
+    config: { presence: { key: myId }, broadcast: { self: false } },
+  });
+
+  channel.on("presence", { event: "sync" }, () => {
+    const state = channel.presenceState();
+    const before = peers;
+    peers = {};
+    for (const [id, metas] of Object.entries(state)) {
+      if (id === myId) continue;
+      peers[id] = metas[0].name;
+      names[id] = metas[0].name;
+    }
+    for (const id of Object.keys(before)) {
+      if (!peers[id]) addNote(id, names[id] + " が退出しました");
+    }
+    renderList();
+    if (current) updateInput();
+  });
+
+  channel.on("broadcast", { event: "msg" }, ({ payload }) => {
+    if (payload.to !== myId) return;
+    names[payload.from] = payload.name;
+    (logs[payload.from] ||= []).push({ mine: false, text: payload.text });
+    if (current === payload.from) renderMsgs();
+    else unread[payload.from] = (unread[payload.from] || 0) + 1;
+    renderList();
+  });
+
+  channel.subscribe(async (status) => {
+    if (status === "SUBSCRIBED") {
+      await channel.track({ name: myName });
+      $("status").textContent = "接続済み";
+    } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+      $("status").textContent = "接続エラー(設定を確認してね)";
+    } else if (status === "CLOSED") {
+      $("status").textContent = "切断されました";
+    }
+  });
+}
+
+function renderList() {
+  const ids = Object.keys(peers);
+  $("empty").style.display = ids.length ? "none" : "block";
+  const ul = $("list");
+  ul.textContent = "";
+  for (const id of ids) {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    if (id === current) b.setAttribute("aria-current", "true");
+    const dot = document.createElement("span"); dot.className = "dot";
+    const label = document.createElement("span"); label.textContent = peers[id];
+    b.append(dot, label);
+    if (unread[id]) {
+      const bd = document.createElement("span");
+      bd.className = "badge"; bd.textContent = unread[id];
+      b.append(bd);
+    }
+    b.addEventListener("click", () => openChat(id));
+    li.append(b);
+    ul.append(li);
+  }
+}
+
+function openChat(id) {
+  current = id;
+  unread[id] = 0;
+  $("peerName").textContent = names[id] || "相手";
+  $("app").dataset.view = "chat";
+  renderList();
+  renderMsgs();
+  updateInput();
+  if (!$("text").disabled) $("text").focus();
+}
+
+function updateInput() {
+  const online = !!peers[current];
+  $("text").disabled = !online;
+  $("send").querySelector("button").disabled = !online;
+}
+
+function renderMsgs() {
+  const box = $("msgs");
+  box.textContent = "";
+  const log = logs[current] || [];
+  if (!log.length) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = (names[current] || "相手") + " とのチャットを始めよう";
+    box.append(p);
+  }
+  for (const m of log) {
+    const d = document.createElement("div");
+    if (m.note) { d.className = "note"; d.textContent = m.note; }
+    else { d.className = "m" + (m.mine ? " mine" : ""); d.textContent = m.text; }
+    box.append(d);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function addNote(id, note) {
+  (logs[id] ||= []).push({ note });
+  if (current === id) renderMsgs();
+}
+
+$("send").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = $("text").value.trim();
+  if (!text || !current || !peers[current]) return;
+  channel.send({ type: "broadcast", event: "msg", payload: { from: myId, to: current, name: myName, text } });
+  (logs[current] ||= []).push({ mine: true, text });
+  $("text").value = "";
+  renderMsgs();
+});
+
+$("back").addEventListener("click", () => { $("app").dataset.view = "list"; });
+</script>
+</body>
+</html>

@@ -131,8 +131,11 @@ const $ = (id) => document.getElementById(id);
 const qs = new URLSearchParams(location.search);
 const W = 128;                                   // スワイプで出るボタン幅
 const BUCKET = "chat-images";
-let me = (qs.get("me") || "").trim().slice(0, 20);
-let current = (qs.get("you") || "").trim().slice(0, 20) || null;
+const clean = (s) => s.replace(/#/g, "").trim().slice(0, 20);   // # は内部IDの区切りに使う
+const disp = (id) => id.split("#")[0];                           // 画面には # より前だけ出す
+let me = clean(qs.get("me") || "");
+let wantYou = clean(qs.get("you") || "") || null;                // 表示名で指定された相手
+let current = wantYou;
 let sb, channel, uid, online = new Set(), editingId = null, openEl = null, lastTyping = 0, ac = null;
 const logs = {};                                 // 相手の名前 -> メッセージ配列
 const typingUntil = {};
@@ -144,7 +147,7 @@ const other = (r) => (r.from_name === me ? r.to_name : r.from_name);
 try { $("nameInput").value = me || localStorage.getItem("chat-name") || ""; } catch (e) { $("nameInput").value = me; }
 $("loginForm").addEventListener("submit", (e) => {
   e.preventDefault();
-  const n = $("nameInput").value.trim();
+  const n = clean($("nameInput").value);
   if (!n) return;
   me = n;
   try { localStorage.setItem("chat-name", n); } catch (e) {}
@@ -187,12 +190,23 @@ async function start() {
       session = r.data.session;
     }
     uid = session.user.id;
-    // 名前をこの端末に結びつける(すでにほかの端末が使っていたらエラー)
-    const own = await sb.from("profiles").select("name").eq("name", me).maybeSingle();
-    if (!own.data) {
-      const r = await sb.from("profiles").insert({ name: me, uid });
-      if (r.error) throw new Error(r.error.code === "23505" ? "その名前はほかの人が使っています。別の名前にしてね" : r.error.message + "(SQLを実行したか確認してね)");
+    // 内部ID: この端末がすでに持っていればそれを使う。なければ登録し、かぶったら #XXXX を付ける(画面には出ない)
+    const rows = await sb.from("profiles").select("name");
+    if (rows.error) throw new Error(rows.error.message + "(SQLを実行したか確認してね)");
+    const found = rows.data.map((r) => r.name).find((n) => n === me || n.startsWith(me + "#"));
+    if (found) me = found;
+    else {
+      let id = me, ok = false;
+      for (let i = 0; i < 6; i++) {
+        const r = await sb.from("profiles").insert({ name: id, uid });
+        if (!r.error) { ok = true; break; }
+        if (r.error.code !== "23505") throw new Error(r.error.message);
+        id = me + "#" + Math.random().toString(36).slice(2, 6).toUpperCase();
+      }
+      if (!ok) throw new Error("登録できませんでした。もう一度試してね");
+      me = id;
     }
+    $("me").textContent = disp(me);
   } catch (e) { return fail(e.message); }
   connect();
   if (current) openChat(current);
@@ -202,7 +216,10 @@ function connect() {
   channel = sb.channel("lobby", { config: { presence: { key: me } } });
   channel.on("presence", { event: "sync" }, () => {
     online = new Set(Object.keys(channel.presenceState()).filter((n) => n !== me));
-    renderList(); renderHead(); if (current && !(logs[current] || []).length) renderMsgs();
+    const before = current;
+    resolveYou();
+    renderList(); renderHead();
+    if (current !== before || (current && !(logs[current] || []).length)) renderMsgs(true);
   });
   channel.on("broadcast", { event: "typing" }, ({ payload }) => {
     if (payload.to !== me) return;
@@ -231,6 +248,13 @@ function add(r) {
   l.sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
   return true;
 }
+// ?you=名前 で指定された表示名に合う相手を探す(オンラインの人を優先)
+function resolveYou() {
+  if (!wantYou || (current && online.has(current))) return;
+  const ids = [...online, ...Object.keys(logs)].filter((id) => id !== me && (id === wantYou || disp(id) === wantYou));
+  const pick = ids.find((id) => online.has(id)) || ids[0];
+  if (pick) current = pick;
+}
 function replace(r) { const p = other(r); logs[p] = (logs[p] || []).map((m) => (m.id === r.id ? r : m)); }
 function err(e) { $("status").textContent = "エラー: " + e.message; }
 
@@ -241,7 +265,7 @@ async function loadHistory() {
   if (error) return err(error);
   for (const k in logs) delete logs[k];
   data.forEach((r) => add(r));
-  renderList(); renderMsgs(true); markRead();
+  resolveYou(); renderHead(); renderList(); renderMsgs(true); markRead();
 }
 
 function onChange(p) {
@@ -269,7 +293,7 @@ function markRead() {
 }
 
 function renderHead() {
-  $("peerName").textContent = current || "相手を選んでください";
+  $("peerName").textContent = current ? disp(current) : "相手を選んでください";
   $("peerState").textContent = !current ? ""
     : (typingUntil[current] || 0) > Date.now() ? "✎ 入力中…"
     : online.has(current) ? "● オンライン" : "○ オフライン";
@@ -294,14 +318,14 @@ function renderList() {
     if (id === current) b.setAttribute("aria-current", "true");
     const dot = document.createElement("span");
     dot.className = "dot" + (online.has(id) ? "" : " off");
-    const label = document.createElement("span"); label.textContent = id;
+    const label = document.createElement("span"); label.textContent = disp(id);
     b.append(dot, label);
     if (n) {
       const bd = document.createElement("span");
       bd.className = "badge"; bd.textContent = n;
       b.append(bd);
     }
-    b.addEventListener("click", () => openChat(id));
+    b.addEventListener("click", () => { wantYou = null; openChat(id); });
     li.append(b);
     ul.append(li);
   }
@@ -328,8 +352,8 @@ function renderMsgs(force) {
     const p = document.createElement("p");
     p.className = "hint";
     p.textContent = !current ? "左の一覧から、話したい人をクリック"
-      : online.has(current) ? current + " とのチャットを始めよう"
-      : "まだいません。" + current + " の入室を待っています…";
+      : online.has(current) ? disp(current) + " とのチャットを始めよう"
+      : "まだいません。" + disp(current) + " の入室を待っています…";
     box.append(p);
   }
   for (const m of log) box.append(row(m));

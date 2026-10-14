@@ -81,6 +81,8 @@
     #app[data-view="list"] #main { display: none; }
     #back { display: block; }
   }
+  .m img { display: block; max-width: min(240px, 100%); border-radius: 8px; margin-bottom: 4px; cursor: pointer; }
+  #attach { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -90,6 +92,7 @@
     <h1>オンラインチャット</h1>
     <p>このページを開いている人と話せます。名前を入れてね。</p>
     <input id="nameInput" maxlength="20" placeholder="名前" required autocomplete="nickname">
+    <p id="loginMsg" style="color:#d93a3a;font-size:13px;margin:0 0 12px"></p>
     <button class="primary" type="submit">入る</button>
   </form>
 </div>
@@ -112,6 +115,8 @@
     <div id="msgs"><p class="hint">左の一覧から、話したい人をクリック</p></div>
     <div id="editbar">編集中… <button type="button" id="cancelEdit">キャンセル</button></div>
     <form id="send">
+      <button type="button" id="attach" aria-label="画像を送る" disabled>📎</button>
+      <input type="file" id="file" accept="image/*" hidden>
       <input id="text" maxlength="1000" placeholder="メッセージ" autocomplete="off" disabled>
       <button class="primary" type="submit" disabled>送信</button>
     </form>
@@ -125,11 +130,12 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const $ = (id) => document.getElementById(id);
 const qs = new URLSearchParams(location.search);
 const W = 128;                                   // スワイプで出るボタン幅
+const BUCKET = "chat-images";
 let me = (qs.get("me") || "").trim().slice(0, 20);
 let current = (qs.get("you") || "").trim().slice(0, 20) || null;
-let sb, channel, online = new Set(), editingId = null, openEl = null;
+let sb, channel, uid, online = new Set(), editingId = null, openEl = null, lastTyping = 0, ac = null;
 const logs = {};                                 // 相手の名前 -> メッセージ配列
-const unread = {};
+const typingUntil = {};
 const NG = [];   // 送れない言葉。例: ["ばか", "あほ"]
 const hasNG = (t) => NG.some((w) => w && t.includes(w));
 const q = (s) => '"' + s.replace(/(["\\])/g, "\\$1") + '"';
@@ -146,21 +152,62 @@ $("loginForm").addEventListener("submit", (e) => {
 });
 if (me) start();
 
-function start() {
+// 通知音(ブラウザの決まりで、最初に1回ページを触ったあとから鳴る)
+const unlock = () => { try { ac ||= new (window.AudioContext || window.webkitAudioContext)(); ac.resume(); } catch (e) {} };
+addEventListener("pointerdown", unlock);
+addEventListener("keydown", unlock);
+function beep() {
+  if (!ac || ac.state !== "running") return;
+  const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+  o.frequency.value = 880;
+  g.gain.setValueAtTime(0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+  o.connect(g); g.connect(ac.destination); o.start(); o.stop(t + 0.25);
+}
+
+function fail(msg) {
+  $("app").style.display = "none";
+  $("login").style.display = "grid";
+  $("loginMsg").textContent = msg;
+}
+
+async function start() {
   if (current === me) current = null;
+  $("loginMsg").textContent = "";
   $("login").style.display = "none";
   $("app").style.display = "grid";
   $("me").textContent = me;
+  sb = sb || supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  try {
+    // 端末ごとの匿名ID(合言葉なし)を作り、名前をその端末に結びつける
+    let { data: { session } } = await sb.auth.getSession();
+    if (!session) {
+      const r = await sb.auth.signInAnonymously();
+      if (r.error) throw new Error("匿名ログインに失敗: " + r.error.message + "(Supabase で Anonymous sign-ins をオンにしてね)");
+      session = r.data.session;
+    }
+    uid = session.user.id;
+    // 名前をこの端末に結びつける(すでにほかの端末が使っていたらエラー)
+    const own = await sb.from("profiles").select("name").eq("name", me).maybeSingle();
+    if (!own.data) {
+      const r = await sb.from("profiles").insert({ name: me, uid });
+      if (r.error) throw new Error(r.error.code === "23505" ? "その名前はほかの人が使っています。別の名前にしてね" : r.error.message + "(SQLを実行したか確認してね)");
+    }
+  } catch (e) { return fail(e.message); }
   connect();
   if (current) openChat(current);
 }
 
 function connect() {
-  sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
   channel = sb.channel("lobby", { config: { presence: { key: me } } });
   channel.on("presence", { event: "sync" }, () => {
     online = new Set(Object.keys(channel.presenceState()).filter((n) => n !== me));
     renderList(); renderHead(); if (current && !(logs[current] || []).length) renderMsgs();
+  });
+  channel.on("broadcast", { event: "typing" }, ({ payload }) => {
+    if (payload.to !== me) return;
+    typingUntil[payload.from] = Date.now() + 3000;
+    renderHead(); setTimeout(renderHead, 3100);
   });
   channel.on("postgres_changes", { event: "*", schema: "public", table: "messages" }, onChange);
   channel.subscribe(async (status) => {
@@ -174,7 +221,7 @@ function connect() {
       $("status").textContent = "切断されました";
     }
   });
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadHistory(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { loadHistory(); } });
 }
 
 function add(r) {
@@ -185,7 +232,7 @@ function add(r) {
   return true;
 }
 function replace(r) { const p = other(r); logs[p] = (logs[p] || []).map((m) => (m.id === r.id ? r : m)); }
-function err(e) { $("status").textContent = "エラー: " + e.message + "(テーブルを作ったか確認してね)"; }
+function err(e) { $("status").textContent = "エラー: " + e.message; }
 
 async function loadHistory() {
   const { data, error } = await sb.from("messages").select("*")
@@ -194,7 +241,7 @@ async function loadHistory() {
   if (error) return err(error);
   for (const k in logs) delete logs[k];
   data.forEach((r) => add(r));
-  renderList(); renderMsgs(true);
+  renderList(); renderMsgs(true); markRead();
 }
 
 function onChange(p) {
@@ -204,14 +251,28 @@ function onChange(p) {
     const r = p.new;
     if (r.from_name !== me && r.to_name !== me) return;
     if (p.eventType === "UPDATE") replace(r);
-    else if (add(r) && r.from_name !== me && other(r) !== current) unread[other(r)] = (unread[other(r)] || 0) + 1;
+    else if (add(r) && r.from_name !== me) { typingUntil[r.from_name] = 0; beep(); }
   }
-  renderList(); renderMsgs();
+  renderList(); renderMsgs(); renderHead(); markRead();
+}
+
+// いま開いている会話の、相手からの未読を「既読」にする
+function markRead() {
+  if (!current || document.hidden) return;
+  const l = logs[current] || [];
+  const ids = l.filter((m) => m.to_name === me && !m.read_at).map((m) => m.id);
+  if (!ids.length) return;
+  const now = new Date().toISOString();
+  l.forEach((m) => { if (ids.includes(m.id)) m.read_at = now; });
+  sb.from("messages").update({ read_at: now }).in("id", ids).then(({ error }) => error && err(error));
+  renderList();
 }
 
 function renderHead() {
   $("peerName").textContent = current || "相手を選んでください";
-  $("peerState").textContent = current ? (online.has(current) ? "● オンライン" : "○ オフライン") : "";
+  $("peerState").textContent = !current ? ""
+    : (typingUntil[current] || 0) > Date.now() ? "✎ 入力中…"
+    : online.has(current) ? "● オンライン" : "○ オフライン";
 }
 
 function renderList() {
@@ -222,7 +283,11 @@ function renderList() {
   $("empty").style.display = ids.length ? "none" : "block";
   const ul = $("list");
   ul.textContent = "";
+  let total = 0;
   for (const id of ids) {
+    const n = id === current && !document.hidden ? 0
+      : (logs[id] || []).filter((m) => m.to_name === me && !m.read_at).length;
+    total += n;
     const li = document.createElement("li");
     const b = document.createElement("button");
     b.type = "button";
@@ -231,31 +296,31 @@ function renderList() {
     dot.className = "dot" + (online.has(id) ? "" : " off");
     const label = document.createElement("span"); label.textContent = id;
     b.append(dot, label);
-    if (unread[id]) {
+    if (n) {
       const bd = document.createElement("span");
-      bd.className = "badge"; bd.textContent = unread[id];
+      bd.className = "badge"; bd.textContent = n;
       b.append(bd);
     }
     b.addEventListener("click", () => openChat(id));
     li.append(b);
     ul.append(li);
   }
+  document.title = (total ? `(${total}) ` : "") + "オンラインチャット";
 }
 
 function openChat(id) {
   current = id;
-  unread[id] = 0;
   setEdit(null);
   $("app").dataset.view = "chat";
-  $("text").disabled = false;
-  $("send").querySelector("button").disabled = false;
-  renderHead(); renderList(); renderMsgs(true);
+  $("send").querySelectorAll("input, button").forEach((x) => (x.disabled = false));
+  renderHead(); renderList(); renderMsgs(true); markRead();
   $("text").focus();
 }
 
 function renderMsgs(force) {
   const box = $("msgs");
   const stick = force || box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  box._stick = stick;
   box.textContent = "";
   openEl = null;
   const log = current ? logs[current] || [] : [];
@@ -284,16 +349,25 @@ function row(m) {
   r.className = "row" + (mine ? " mine" : "");
   const b = document.createElement("div");
   b.className = "m";
-  b.append(document.createTextNode(m.body));
+  if (m.image_url) {
+    const im = document.createElement("img");
+    im.loading = "lazy"; im.alt = "画像"; im.src = m.image_url;
+    im.addEventListener("load", () => { const box = $("msgs"); if (box._stick) box.scrollTop = box.scrollHeight; });
+    im.addEventListener("click", () => window.open(m.image_url, "_blank"));
+    b.append(im);
+  }
+  if (m.body) b.append(document.createTextNode(m.body));
   const s = document.createElement("small");
-  s.textContent = new Date(m.created_at).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) + (m.edited ? " · 編集済み" : "");
+  s.textContent = new Date(m.created_at).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })
+    + (m.edited ? " · 編集済み" : "") + (mine && m.read_at ? " · 既読" : "");
   b.append(s);
   if (mine) {
     const sl = document.createElement("div");
     sl.className = "slide";
     const a = document.createElement("div");
     a.className = "acts";
-    a.append(btn("編集", "ed", () => startEdit(m)), btn("削除", "del", () => remove(m)));
+    if (!m.image_url) a.append(btn("編集", "ed", () => startEdit(m)));
+    a.append(btn("削除", "del", () => remove(m)));
     sl.append(b, a);
     r.append(sl);
     swipe(b, sl);
@@ -344,8 +418,15 @@ async function remove(m) {
   if (editingId === m.id) { setEdit(null); $("text").value = ""; }
   const { error } = await sb.from("messages").delete().eq("id", m.id);
   if (error) return err(error);
+  if (m.image_url) sb.storage.from(BUCKET).remove([m.image_url.split("/" + BUCKET + "/")[1]]);
   for (const k in logs) logs[k] = logs[k].filter((x) => x.id !== m.id);
   renderMsgs(); renderList();
+}
+
+async function send(fields) {
+  const { data, error } = await sb.from("messages").insert({ from_name: me, to_name: current, ...fields }).select().single();
+  if (error) throw error;
+  add(data); renderMsgs(true); renderList();
 }
 
 $("send").addEventListener("submit", async (e) => {
@@ -354,17 +435,48 @@ $("send").addEventListener("submit", async (e) => {
   if (!text || !current) return;
   if (hasNG(text)) { $("status").textContent = "NGワードが含まれているので送れません"; return; }
   $("text").value = "";
-  if (editingId) {
-    const id = editingId;
-    setEdit(null);
-    const { data, error } = await sb.from("messages").update({ body: text, edited: true }).eq("id", id).select().single();
-    if (error) { $("text").value = text; return err(error); }
-    replace(data); renderMsgs();
-    return;
-  }
-  const { data, error } = await sb.from("messages").insert({ from_name: me, to_name: current, body: text }).select().single();
-  if (error) { $("text").value = text; return err(error); }
-  add(data); renderMsgs(true); renderList();
+  try {
+    if (editingId) {
+      const id = editingId;
+      setEdit(null);
+      const { data, error } = await sb.from("messages").update({ body: text, edited: true }).eq("id", id).select().single();
+      if (error) throw error;
+      replace(data); renderMsgs();
+    } else await send({ body: text });
+  } catch (e2) { $("text").value = text; err(e2); }
+});
+
+$("text").addEventListener("input", () => {
+  if (!current || Date.now() - lastTyping < 2000) return;
+  lastTyping = Date.now();
+  channel.send({ type: "broadcast", event: "typing", payload: { from: me, to: current } });
+});
+
+// 画像: 長辺1280pxに縮めてJPEGにしてから送る
+async function shrink(f) {
+  const bmp = await createImageBitmap(f);
+  const k = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  return new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.82));
+}
+$("attach").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f || !current) return;
+  if (!f.type.startsWith("image/") || f.size > 20e6) { $("status").textContent = "画像(20MBまで)を選んでね"; return; }
+  $("status").textContent = "画像を送信中…";
+  try {
+    const path = Date.now() + "-" + Math.random().toString(36).slice(2) + ".jpg";
+    const up = await sb.storage.from(BUCKET).upload(path, await shrink(f), { contentType: "image/jpeg" });
+    if (up.error) throw up.error;
+    await send({ body: "", image_url: sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl });
+    $("status").textContent = "接続済み";
+  } catch (e2) { err(e2); }
 });
 
 $("back").addEventListener("click", () => { $("app").dataset.view = "list"; });

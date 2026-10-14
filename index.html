@@ -60,7 +60,8 @@
   .m { position: relative; max-width: min(75%, 520px); padding: 8px 12px; border-radius: 12px; background: var(--theirs); overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.5; touch-action: pan-y; transition: transform .2s ease; }
   .mine .m { background: var(--mine); cursor: grab; user-select: none; -webkit-user-select: none; }
   .m small { display: block; color: var(--sub); font-size: 11px; margin-top: 2px; }
-  .acts { position: absolute; right: 0; top: 0; bottom: 0; display: flex; width: 128px; }
+  .slide { position: relative; display: flex; justify-content: flex-end; width: 100%; transition: transform .2s ease; }
+  .acts { position: absolute; left: 100%; top: 0; bottom: 0; display: flex; width: 128px; }
   .acts button { flex: 1; border: 0; color: #fff; cursor: pointer; font-size: 13px; }
   .acts .ed { background: #6b7872; }
   .acts .del { background: #d93a3a; }
@@ -129,6 +130,8 @@ let current = (qs.get("you") || "").trim().slice(0, 20) || null;
 let sb, channel, online = new Set(), editingId = null, openEl = null;
 const logs = {};                                 // 相手の名前 -> メッセージ配列
 const unread = {};
+const NG = [];   // 送れない言葉。例: ["ばか", "あほ"]
+const hasNG = (t) => NG.some((w) => w && t.includes(w));
 const q = (s) => '"' + s.replace(/(["\\])/g, "\\$1") + '"';
 const other = (r) => (r.from_name === me ? r.to_name : r.from_name);
 
@@ -286,20 +289,24 @@ function row(m) {
   s.textContent = new Date(m.created_at).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) + (m.edited ? " · 編集済み" : "");
   b.append(s);
   if (mine) {
+    const sl = document.createElement("div");
+    sl.className = "slide";
     const a = document.createElement("div");
     a.className = "acts";
     a.append(btn("編集", "ed", () => startEdit(m)), btn("削除", "del", () => remove(m)));
-    r.append(a);
-    swipe(b);
+    sl.append(b, a);
+    r.append(sl);
+    swipe(b, sl);
+    return r;
   }
   r.append(b);
   return r;
 }
 
 // 左にスワイプ(PCはドラッグ)で「編集」「削除」が出る
-function swipe(el) {
+function swipe(el, t) {
   let sx = null, x = 0, base = 0, moved = false;
-  const set = (v, anim) => { el.style.transition = anim ? "" : "none"; el.style.transform = v ? `translateX(${v}px)` : ""; x = v; };
+  const set = (v, anim) => { t.style.transition = anim ? "" : "none"; t.style.transform = v ? `translateX(${v}px)` : ""; x = v; };
   el.addEventListener("pointerdown", (e) => {
     if (openEl && openEl !== el) openEl.close();
     sx = e.clientX; base = x; moved = false; el.setPointerCapture(e.pointerId);
@@ -345,6 +352,7 @@ $("send").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("text").value.trim();
   if (!text || !current) return;
+  if (hasNG(text)) { $("status").textContent = "NGワードが含まれているので送れません"; return; }
   $("text").value = "";
   if (editingId) {
     const id = editingId;

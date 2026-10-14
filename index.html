@@ -55,8 +55,19 @@
   #back { display: none; background: none; border: 0; cursor: pointer; font-size: 18px; padding: 0 6px 0 0; }
   #msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
   .hint { margin: auto; color: var(--sub); font-size: 14px; text-align: center; }
-  .m { max-width: min(75%, 520px); padding: 8px 12px; border-radius: 12px; background: var(--theirs); overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.5; }
-  .m.mine { align-self: flex-end; background: var(--mine); }
+  .row { position: relative; display: flex; overflow: hidden; border-radius: 12px; flex: none; }
+  .row.mine { justify-content: flex-end; }
+  .m { position: relative; max-width: min(75%, 520px); padding: 8px 12px; border-radius: 12px; background: var(--theirs); overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.5; touch-action: pan-y; transition: transform .2s ease; }
+  .mine .m { background: var(--mine); cursor: grab; user-select: none; -webkit-user-select: none; }
+  .m small { display: block; color: var(--sub); font-size: 11px; margin-top: 2px; }
+  .acts { position: absolute; right: 0; top: 0; bottom: 0; display: flex; width: 128px; }
+  .acts button { flex: 1; border: 0; color: #fff; cursor: pointer; font-size: 13px; }
+  .acts .ed { background: #6b7872; }
+  .acts .del { background: #d93a3a; }
+  .dot.off { background: var(--sub); opacity: .5; }
+  #peerState { font-size: 12px; color: var(--sub); }
+  #editbar { display: none; padding: 6px 12px; font-size: 13px; color: var(--sub); background: var(--panel); border-top: 1px solid var(--line); }
+  #editbar button { background: none; border: 0; color: var(--accent); cursor: pointer; margin-left: 8px; }
   .note { align-self: center; color: var(--sub); font-size: 12px; }
   #send { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); background: var(--panel); }
   #send input { flex: 1; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); min-width: 0; }
@@ -95,8 +106,10 @@
     <header>
       <button id="back" aria-label="一覧に戻る">←</button>
       <b id="peerName">相手を選んでください</b>
+      <span id="peerState"></span>
     </header>
     <div id="msgs"><p class="hint">左の一覧から、話したい人をクリック</p></div>
+    <div id="editbar">編集中… <button type="button" id="cancelEdit">キャンセル</button></div>
     <form id="send">
       <input id="text" maxlength="1000" placeholder="メッセージ" autocomplete="off" disabled>
       <button class="primary" type="submit" disabled>送信</button>
@@ -105,79 +118,104 @@
 </div>
 
 <script>
-// ===== 設定: Supabase の Project Settings → API からコピー =====
 const SUPABASE_URL = "https://yhlldyozjcrwqltazcwz.supabase.co";
 const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
-// =============================================================
 
 const $ = (id) => document.getElementById(id);
-const myId = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
-let myName = "";
-let channel = null;
-let peers = {};          // id -> name(いまオンラインの人)
-let current = null;      // 開いている相手の id
-const logs = {};         // id -> [{mine, text} | {note}]
-const names = {};        // id -> 最後に見た名前
-const unread = {};       // id -> 件数
+const qs = new URLSearchParams(location.search);
+const W = 128;                                   // スワイプで出るボタン幅
+let me = (qs.get("me") || "").trim().slice(0, 20);
+let current = (qs.get("you") || "").trim().slice(0, 20) || null;
+let sb, channel, online = new Set(), editingId = null, openEl = null;
+const logs = {};                                 // 相手の名前 -> メッセージ配列
+const unread = {};
+const q = (s) => '"' + s.replace(/(["\\])/g, "\\$1") + '"';
+const other = (r) => (r.from_name === me ? r.to_name : r.from_name);
 
-try { $("nameInput").value = localStorage.getItem("chat-name") || ""; } catch (e) {}
-
+try { $("nameInput").value = me || localStorage.getItem("chat-name") || ""; } catch (e) { $("nameInput").value = me; }
 $("loginForm").addEventListener("submit", (e) => {
   e.preventDefault();
-  myName = $("nameInput").value.trim();
-  if (!myName) return;
-  try { localStorage.setItem("chat-name", myName); } catch (e) {}
+  const n = $("nameInput").value.trim();
+  if (!n) return;
+  me = n;
+  try { localStorage.setItem("chat-name", n); } catch (e) {}
+  start();
+});
+if (me) start();
+
+function start() {
+  if (current === me) current = null;
   $("login").style.display = "none";
   $("app").style.display = "grid";
-  $("me").textContent = myName;
+  $("me").textContent = me;
   connect();
-});
+  if (current) openChat(current);
+}
 
 function connect() {
-  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-  channel = sb.channel("lobby", {
-    config: { presence: { key: myId }, broadcast: { self: false } },
-  });
-
+  sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  channel = sb.channel("lobby", { config: { presence: { key: me } } });
   channel.on("presence", { event: "sync" }, () => {
-    const state = channel.presenceState();
-    const before = peers;
-    peers = {};
-    for (const [id, metas] of Object.entries(state)) {
-      if (id === myId) continue;
-      peers[id] = metas[0].name;
-      names[id] = metas[0].name;
-    }
-    for (const id of Object.keys(before)) {
-      if (!peers[id]) addNote(id, names[id] + " が退出しました");
-    }
-    renderList();
-    if (current) updateInput();
+    online = new Set(Object.keys(channel.presenceState()).filter((n) => n !== me));
+    renderList(); renderHead(); if (current && !(logs[current] || []).length) renderMsgs();
   });
-
-  channel.on("broadcast", { event: "msg" }, ({ payload }) => {
-    if (payload.to !== myId) return;
-    names[payload.from] = payload.name;
-    (logs[payload.from] ||= []).push({ mine: false, text: payload.text });
-    if (current === payload.from) renderMsgs();
-    else unread[payload.from] = (unread[payload.from] || 0) + 1;
-    renderList();
-  });
-
+  channel.on("postgres_changes", { event: "*", schema: "public", table: "messages" }, onChange);
   channel.subscribe(async (status) => {
     if (status === "SUBSCRIBED") {
-      await channel.track({ name: myName });
+      await channel.track({ name: me });
       $("status").textContent = "接続済み";
+      loadHistory();
     } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
       $("status").textContent = "接続エラー(設定を確認してね)";
     } else if (status === "CLOSED") {
       $("status").textContent = "切断されました";
     }
   });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadHistory(); });
+}
+
+function add(r) {
+  const l = (logs[other(r)] ||= []);
+  if (l.some((m) => m.id === r.id)) return false;
+  l.push(r);
+  l.sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+  return true;
+}
+function replace(r) { const p = other(r); logs[p] = (logs[p] || []).map((m) => (m.id === r.id ? r : m)); }
+function err(e) { $("status").textContent = "エラー: " + e.message + "(テーブルを作ったか確認してね)"; }
+
+async function loadHistory() {
+  const { data, error } = await sb.from("messages").select("*")
+    .or(`from_name.eq.${q(me)},to_name.eq.${q(me)}`)
+    .order("created_at", { ascending: false }).limit(500);
+  if (error) return err(error);
+  for (const k in logs) delete logs[k];
+  data.forEach((r) => add(r));
+  renderList(); renderMsgs(true);
+}
+
+function onChange(p) {
+  if (p.eventType === "DELETE") {
+    for (const k in logs) logs[k] = logs[k].filter((m) => m.id !== p.old.id);
+  } else {
+    const r = p.new;
+    if (r.from_name !== me && r.to_name !== me) return;
+    if (p.eventType === "UPDATE") replace(r);
+    else if (add(r) && r.from_name !== me && other(r) !== current) unread[other(r)] = (unread[other(r)] || 0) + 1;
+  }
+  renderList(); renderMsgs();
+}
+
+function renderHead() {
+  $("peerName").textContent = current || "相手を選んでください";
+  $("peerState").textContent = current ? (online.has(current) ? "● オンライン" : "○ オフライン") : "";
 }
 
 function renderList() {
-  const ids = Object.keys(peers);
+  const people = new Set([...online, ...Object.keys(logs)]);
+  if (current) people.add(current);
+  const ids = [...people].filter((n) => n !== me)
+    .sort((a, b) => online.has(b) - online.has(a) || a.localeCompare(b));
   $("empty").style.display = ids.length ? "none" : "block";
   const ul = $("list");
   ul.textContent = "";
@@ -186,8 +224,9 @@ function renderList() {
     const b = document.createElement("button");
     b.type = "button";
     if (id === current) b.setAttribute("aria-current", "true");
-    const dot = document.createElement("span"); dot.className = "dot";
-    const label = document.createElement("span"); label.textContent = peers[id];
+    const dot = document.createElement("span");
+    dot.className = "dot" + (online.has(id) ? "" : " off");
+    const label = document.createElement("span"); label.textContent = id;
     b.append(dot, label);
     if (unread[id]) {
       const bd = document.createElement("span");
@@ -203,52 +242,121 @@ function renderList() {
 function openChat(id) {
   current = id;
   unread[id] = 0;
-  $("peerName").textContent = names[id] || "相手";
+  setEdit(null);
   $("app").dataset.view = "chat";
-  renderList();
-  renderMsgs();
-  updateInput();
-  if (!$("text").disabled) $("text").focus();
+  $("text").disabled = false;
+  $("send").querySelector("button").disabled = false;
+  renderHead(); renderList(); renderMsgs(true);
+  $("text").focus();
 }
 
-function updateInput() {
-  const online = !!peers[current];
-  $("text").disabled = !online;
-  $("send").querySelector("button").disabled = !online;
-}
-
-function renderMsgs() {
+function renderMsgs(force) {
   const box = $("msgs");
+  const stick = force || box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   box.textContent = "";
-  const log = logs[current] || [];
+  openEl = null;
+  const log = current ? logs[current] || [] : [];
   if (!log.length) {
     const p = document.createElement("p");
     p.className = "hint";
-    p.textContent = (names[current] || "相手") + " とのチャットを始めよう";
+    p.textContent = !current ? "左の一覧から、話したい人をクリック"
+      : online.has(current) ? current + " とのチャットを始めよう"
+      : "まだいません。" + current + " の入室を待っています…";
     box.append(p);
   }
-  for (const m of log) {
-    const d = document.createElement("div");
-    if (m.note) { d.className = "note"; d.textContent = m.note; }
-    else { d.className = "m" + (m.mine ? " mine" : ""); d.textContent = m.text; }
-    box.append(d);
+  for (const m of log) box.append(row(m));
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+function btn(t, c, f) {
+  const x = document.createElement("button");
+  x.type = "button"; x.textContent = t; x.className = c;
+  x.addEventListener("click", f);
+  return x;
+}
+
+function row(m) {
+  const mine = m.from_name === me;
+  const r = document.createElement("div");
+  r.className = "row" + (mine ? " mine" : "");
+  const b = document.createElement("div");
+  b.className = "m";
+  b.append(document.createTextNode(m.body));
+  const s = document.createElement("small");
+  s.textContent = new Date(m.created_at).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) + (m.edited ? " · 編集済み" : "");
+  b.append(s);
+  if (mine) {
+    const a = document.createElement("div");
+    a.className = "acts";
+    a.append(btn("編集", "ed", () => startEdit(m)), btn("削除", "del", () => remove(m)));
+    r.append(a);
+    swipe(b);
   }
-  box.scrollTop = box.scrollHeight;
+  r.append(b);
+  return r;
 }
 
-function addNote(id, note) {
-  (logs[id] ||= []).push({ note });
-  if (current === id) renderMsgs();
+// 左にスワイプ(PCはドラッグ)で「編集」「削除」が出る
+function swipe(el) {
+  let sx = null, x = 0, base = 0, moved = false;
+  const set = (v, anim) => { el.style.transition = anim ? "" : "none"; el.style.transform = v ? `translateX(${v}px)` : ""; x = v; };
+  el.addEventListener("pointerdown", (e) => {
+    if (openEl && openEl !== el) openEl.close();
+    sx = e.clientX; base = x; moved = false; el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (sx === null) return;
+    if (Math.abs(e.clientX - sx) > 4) moved = true;
+    set(Math.max(-W, Math.min(0, base + e.clientX - sx)), false);
+  });
+  const end = () => {
+    if (sx === null) return;
+    sx = null;
+    const open = !moved && base ? false : x < -W / 2;
+    set(open ? -W : 0, true);
+    openEl = open ? el : openEl === el ? null : openEl;
+  };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+  el.close = () => set(0, true);
 }
 
-$("send").addEventListener("submit", (e) => {
+function setEdit(id) {
+  editingId = id;
+  $("editbar").style.display = id ? "block" : "none";
+}
+function startEdit(m) {
+  if (openEl) openEl.close();
+  setEdit(m.id);
+  $("text").value = m.body;
+  $("text").focus();
+}
+$("cancelEdit").addEventListener("click", () => { setEdit(null); $("text").value = ""; });
+
+async function remove(m) {
+  if (editingId === m.id) { setEdit(null); $("text").value = ""; }
+  const { error } = await sb.from("messages").delete().eq("id", m.id);
+  if (error) return err(error);
+  for (const k in logs) logs[k] = logs[k].filter((x) => x.id !== m.id);
+  renderMsgs(); renderList();
+}
+
+$("send").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("text").value.trim();
-  if (!text || !current || !peers[current]) return;
-  channel.send({ type: "broadcast", event: "msg", payload: { from: myId, to: current, name: myName, text } });
-  (logs[current] ||= []).push({ mine: true, text });
+  if (!text || !current) return;
   $("text").value = "";
-  renderMsgs();
+  if (editingId) {
+    const id = editingId;
+    setEdit(null);
+    const { data, error } = await sb.from("messages").update({ body: text, edited: true }).eq("id", id).select().single();
+    if (error) { $("text").value = text; return err(error); }
+    replace(data); renderMsgs();
+    return;
+  }
+  const { data, error } = await sb.from("messages").insert({ from_name: me, to_name: current, body: text }).select().single();
+  if (error) { $("text").value = text; return err(error); }
+  add(data); renderMsgs(true); renderList();
 });
 
 $("back").addEventListener("click", () => { $("app").dataset.view = "list"; });

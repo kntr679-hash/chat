@@ -110,6 +110,11 @@
   #sideFoot button { background: none; border: 0; color: var(--sub); font-size: 12px; cursor: pointer; padding: 4px 6px; }
   .seen { color: var(--sub); font-size: 11px; }
   .m a { color: inherit; text-decoration: underline; word-break: break-all; }
+  .linkbtn { background: none; border: 0; color: var(--sub); font-size: 13px; cursor: pointer; margin-top: 12px; width: 100%; }
+  #renameBtn { background: none; border: 0; cursor: pointer; color: var(--sub); padding: 0 6px; }
+  dialog button { border: 1px solid var(--line); background: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; color: var(--ink); }
+  #linkDlg input { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); text-transform: uppercase; width: 16em; }
+  #codeOut { display: block; font-size: 15px; letter-spacing: .08em; word-break: break-all; margin: 4px 0 12px; }
 </style>
 </head>
 <body>
@@ -121,18 +126,19 @@
     <input id="nameInput" maxlength="20" placeholder="名前" required autocomplete="nickname">
     <p id="loginMsg" style="color:#d93a3a;font-size:13px;margin:0 0 12px"></p>
     <button class="primary" type="submit">入る</button>
+    <button type="button" id="linkOpenLogin" class="linkbtn">別の端末のアカウントを使う</button>
   </form>
 </div>
 
 <div id="app" data-view="list">
   <aside id="side">
     <header>
-      <b id="me"></b>
+      <b id="me"></b><button type="button" id="renameBtn" title="名前を変更">✎</button>
       <span id="status">接続中…</span>
     </header>
     <ul id="list"></ul>
     <p id="empty">いまオンラインの人はいません。別のタブやスマホで開くと表示されます。</p>
-    <div id="sideFoot"><button type="button" id="notifyBtn">🔔 通知 ON</button><button type="button" id="installBtn">📲 ホーム画面に追加</button></div>
+    <div id="sideFoot"><button type="button" id="notifyBtn">🔔 通知 ON</button><button type="button" id="linkOpen">🔗 他の端末とつなぐ</button><button type="button" id="installBtn">📲 ホーム画面に追加</button></div>
   </aside>
   <section id="main">
     <header>
@@ -154,6 +160,20 @@
     <p id="kbHint">Enter で送信 ・ Shift + Enter で改行</p>
   </section>
 </div>
+
+<dialog id="linkDlg">
+  <p>別の端末(Webとホーム画面のアプリなど)を、同じアカウントにつなぎます。</p>
+  <p><b>① つなぐ元(いま使っている端末)</b><br>
+    <button type="button" id="mkCode">コードを作る</button> <button type="button" id="copyCode" style="display:none">コピー</button></p>
+  <code id="codeOut"></code>
+  <p><b>② つなぐ先(新しい端末)</b><br>
+    <button type="button" id="pasteCode">貼り付けてつなぐ</button></p>
+  <p><input id="codeIn" placeholder="または、ここにコードを貼り付け" maxlength="40"> <button type="button" id="useCode">つなぐ</button></p>
+  <p id="linkMsg" class="seen"></p>
+  <p id="devInfo" class="seen"></p>
+  <p><button type="button" id="unlinkOthers" style="display:none">この端末以外を外す</button></p>
+  <div class="dlgBtns"><button type="button" id="linkClose">閉じる</button></div>
+</dialog>
 
 <dialog id="cleanDlg">
   <p id="cleanMsg"></p>
@@ -195,15 +215,17 @@ const qs = new URLSearchParams(location.search);
 const W = 128;                                   // スワイプで出るボタン幅
 const BUCKET = "chat-images";
 const clean = (s) => s.replace(/#/g, "").trim().slice(0, 20);   // # は内部IDの区切りに使う
-const disp = (id) => id.split("#")[0];                           // 画面には # より前だけ出す
-let me = clean(qs.get("me") || "");
+const nicks = {};                                                // 内部ID → 表示名
+const disp = (id) => nicks[id] || id.split("#")[0];
+let want = clean(qs.get("me") || "");   // 入力された名前
+let me = "", myNick = "";               // 内部ID / 表示名
 let wantYou = clean(qs.get("you") || "") || null;                // 表示名で指定された相手
 let current = wantYou;
 let sb, channel, uid, online = new Set(), editingId = null, openEl = null, lastTyping = 0, ac = null;
 const logs = {};                                 // 相手の名前 -> メッセージ配列
 const typingUntil = {};
-let selecting = false, offered = false, installEvt = null, notifyOn = true, pushActive = false;
-try { notifyOn = localStorage.getItem("notify") !== "0"; } catch (e) {}
+let selecting = false, offered = false, installEvt = null, notifyOn = false, pushActive = false;
+try { notifyOn = localStorage.getItem("notify") === "1"; } catch (e) {}
 let friends = new Set();
 const lastSeen = {};
 const selected = new Set();
@@ -220,16 +242,17 @@ if (window.visualViewport) {
   fit();
 }
 
-try { $("nameInput").value = me || localStorage.getItem("chat-name") || ""; } catch (e) { $("nameInput").value = me; }
-$("loginForm").addEventListener("submit", (e) => {
+try { $("nameInput").value = want || localStorage.getItem("chat-name") || ""; } catch (e) { $("nameInput").value = want; }
+$("loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const n = clean($("nameInput").value);
   if (!n) return;
-  me = n;
+  want = n;
   try { localStorage.setItem("chat-name", n); } catch (e) {}
+  try { await signIn(); await claim(n); } catch (e2) { return fail(e2.message); }
   start();
 });
-if (me) start();
+init();
 
 // 通知音(ブラウザの決まりで、最初に1回ページを触ったあとから鳴る)
 const unlock = () => { try { ac ||= new (window.AudioContext || window.webkitAudioContext)(); ac.resume(); } catch (e) {} };
@@ -250,40 +273,52 @@ function fail(msg) {
   $("loginMsg").textContent = msg;
 }
 
-async function start() {
+// ログイン: 端末ごとの匿名ID → アカウント(引き継ぎコードで複数の端末で共有できる)
+async function signIn() {
+  sb = sb || supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  let { data: { session } } = await sb.auth.getSession();
+  if (!session) {
+    const r = await sb.auth.signInAnonymously();
+    if (r.error) throw new Error("匿名ログインに失敗: " + r.error.message + "(Supabase で Anonymous sign-ins をオンにしてね)");
+    session = r.data.session;
+  }
+  uid = session.user.id;
+}
+async function init() {
+  try {
+    await signIn();
+    const r = await sb.rpc("my_profiles");
+    if (r.error) throw new Error(r.error.message + "(SQLを実行したか確認してね)");
+    if (r.data.length) {   // もうアカウントがある: 名前は聞かずに入る(名前は ✎ で変えられる)
+      let saved = "";
+      try { saved = localStorage.getItem("chat-name") || ""; } catch (e) {}
+      const p = r.data.find((x) => x.nick === (want || saved)) || r.data[0];
+      me = p.name; myNick = p.nick;
+      return start();
+    }
+    if (want) { await claim(want); start(); }
+  } catch (e) { fail(e.message); }
+}
+// 新しいアカウントを作る。内部IDがかぶったら #XXXX を付ける(画面には出ない)
+async function claim(nick) {
+  const a = await sb.rpc("ensure_account");
+  if (a.error) throw new Error(a.error.message + "(SQLを実行したか確認してね)");
+  let id = nick, ok = false;
+  for (let i = 0; i < 6; i++) {
+    const r = await sb.from("profiles").insert({ name: id, uid, account: a.data, nick });
+    if (!r.error) { ok = true; break; }
+    if (r.error.code !== "23505") throw new Error(r.error.message);
+    id = nick + "#" + Math.random().toString(36).slice(2, 6).toUpperCase();
+  }
+  if (!ok) throw new Error("登録できませんでした。もう一度試してね");
+  me = id; myNick = nick;
+}
+function start() {
   if (current === me) current = null;
   $("loginMsg").textContent = "";
   $("login").style.display = "none";
   $("app").style.display = "grid";
-  $("me").textContent = me;
-  sb = sb || supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-  try {
-    // 端末ごとの匿名ID(合言葉なし)を作り、名前をその端末に結びつける
-    let { data: { session } } = await sb.auth.getSession();
-    if (!session) {
-      const r = await sb.auth.signInAnonymously();
-      if (r.error) throw new Error("匿名ログインに失敗: " + r.error.message + "(Supabase で Anonymous sign-ins をオンにしてね)");
-      session = r.data.session;
-    }
-    uid = session.user.id;
-    // 内部ID: この端末がすでに持っていればそれを使う。なければ登録し、かぶったら #XXXX を付ける(画面には出ない)
-    const rows = await sb.from("profiles").select("name").eq("uid", uid);
-    if (rows.error) throw new Error(rows.error.message + "(SQLを実行したか確認してね)");
-    const found = rows.data.map((r) => r.name).find((n) => n === me || n.startsWith(me + "#"));
-    if (found) me = found;
-    else {
-      let id = me, ok = false;
-      for (let i = 0; i < 6; i++) {
-        const r = await sb.from("profiles").insert({ name: id, uid });
-        if (!r.error) { ok = true; break; }
-        if (r.error.code !== "23505") throw new Error(r.error.message);
-        id = me + "#" + Math.random().toString(36).slice(2, 6).toUpperCase();
-      }
-      if (!ok) throw new Error("登録できませんでした。もう一度試してね");
-      me = id;
-    }
-    $("me").textContent = disp(me);
-  } catch (e) { return fail(e.message); }
+  $("me").textContent = myNick;
   connect();
   if (current) openChat(current);
   paintNotify();
@@ -295,6 +330,7 @@ function connect() {
   channel.on("presence", { event: "sync" }, () => {
     const prev = online;
     online = new Set(Object.keys(channel.presenceState()).filter((n) => n !== me));
+    for (const [id, ms] of Object.entries(channel.presenceState())) if (ms[0] && ms[0].nick) nicks[id] = ms[0].nick;
     for (const id of prev) if (!online.has(id)) lastSeen[id] = Date.now();
     const before = current;
     resolveYou();
@@ -309,7 +345,7 @@ function connect() {
   channel.on("postgres_changes", { event: "*", schema: "public", table: "messages" }, onChange);
   channel.subscribe(async (status) => {
     if (status === "SUBSCRIBED") {
-      await channel.track({ name: me });
+      await channel.track({ name: me, nick: myNick });
       $("status").textContent = "接続済み";
       loadHistory();
     } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
@@ -702,8 +738,8 @@ function heartbeat() {
   sb.from("profiles").update({ last_seen: new Date().toISOString() }).eq("name", me).then(() => {});
   const ids = [...new Set([...Object.keys(logs), ...friends, ...online])].filter((n) => n !== me);
   if (!ids.length) return;
-  sb.from("profiles").select("name, last_seen").in("name", ids).then(({ data }) => {
-    (data || []).forEach((r) => { if (r.last_seen) lastSeen[r.name] = new Date(r.last_seen).getTime(); });
+  sb.from("profiles").select("name, last_seen, nick").in("name", ids).then(({ data }) => {
+    (data || []).forEach((r) => { if (r.nick) nicks[r.name] = r.nick; if (r.last_seen) lastSeen[r.name] = new Date(r.last_seen).getTime(); });
     renderList(); renderHead();
   });
 }
@@ -721,15 +757,20 @@ async function enablePush(ask) {
   if (perm !== "granted") { if (ask) alert("通知が許可されませんでした。ブラウザの設定で許可してね。"); return; }
   const reg = await swReg;
   if (!reg || !("PushManager" in window)) {
-    if (ask) alert("いまは、ページを開いている間だけ通知します。閉じていても届くプッシュ通知を使うには、sw.js も同じ場所に置いてね。");
+    if (ask) {
+      try { new Notification("通知をオンにしました", { body: "ページを開いたまま別のタブにいるときに通知します" }); } catch (e) {}
+      alert("いまは、ページを開いている間だけ通知します。閉じていても届くプッシュ通知を使うには、sw.js も同じ場所に置いてね。");
+    }
     return;
   }
   try {
     await navigator.serviceWorker.ready;
+    if (ask) reg.showNotification("通知をオンにしました", { body: "新着メッセージは、こんな形で届きます" });
     const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64(VAPID_PUBLIC) });
     const { error } = await sb.from("push_subs").upsert({ endpoint: sub.endpoint, owner_name: me, sub: sub.toJSON() }, { onConflict: "endpoint" });
     if (error) throw error;
     pushActive = true;
+    $("status").textContent = "プッシュ通知をオンにしました";
   } catch (e) { err(e); }
 }
 async function disablePush() {
@@ -766,6 +807,67 @@ $("installBtn").addEventListener("click", () => {
   if (installEvt) { installEvt.prompt(); installEvt = null; return; }
   alert("iPhone / iPad: 共有ボタン →「ホーム画面に追加」\nAndroid / PC の Chrome: メニュー →「アプリをインストール」または「ホーム画面に追加」");
 });
+
+// 名前の変更(内部IDは変わらないので、会話はそのまま)
+$("renameBtn").addEventListener("click", async () => {
+  const n = clean(prompt("新しい名前を入れてね(会話はそのまま引き継がれます)", myNick) || "");
+  if (!n || n === myNick) return;
+  const { error } = await sb.from("profiles").update({ nick: n }).eq("name", me);
+  if (error) return err(error);
+  myNick = n; nicks[me] = n;
+  try { localStorage.setItem("chat-name", n); } catch (e) {}
+  $("me").textContent = n;
+  channel.track({ name: me, nick: n });
+});
+
+// 他の端末とつなぐ(引き継ぎコード)
+const openLink = async () => {
+  $("codeOut").textContent = ""; $("linkMsg").textContent = ""; $("devInfo").textContent = "";
+  $("unlinkOthers").style.display = "none"; $("copyCode").style.display = "none";
+  $("linkDlg").showModal();
+  if (me) {
+    const { data } = await sb.rpc("device_count");
+    if (data) {
+      $("devInfo").textContent = "つながっている端末: " + data + "台";
+      if (data > 1) $("unlinkOthers").style.display = "";
+    }
+  }
+};
+$("unlinkOthers").addEventListener("click", async () => {
+  if (!confirm("この端末以外を、すべてアカウントから外します。よろしいですか?")) return;
+  const { error } = await sb.rpc("unlink_others");
+  $("linkMsg").textContent = error ? "外せませんでした: " + error.message : "外しました";
+  if (!error) { $("devInfo").textContent = "つながっている端末: 1台"; $("unlinkOthers").style.display = "none"; }
+});
+$("linkOpen").addEventListener("click", openLink);
+$("linkOpenLogin").addEventListener("click", async () => { try { await signIn(); } catch (e) { return fail(e.message); } openLink(); });
+$("linkClose").addEventListener("click", () => $("linkDlg").close());
+let lastCode = "";
+$("mkCode").addEventListener("click", async () => {
+  await sb.rpc("ensure_account");
+  const { data, error } = await sb.rpc("make_link_code");
+  if (error) { $("linkMsg").textContent = "コードを作れませんでした: " + error.message; return; }
+  lastCode = data;
+  $("codeOut").textContent = data.match(/.{1,4}/g).join("-");
+  $("copyCode").style.display = "";
+  $("linkMsg").textContent = "「コピー」を押して、5分以内に、もう一方の端末で貼り付けてね。人には見せないでね";
+});
+$("copyCode").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(lastCode); $("linkMsg").textContent = "コピーしました。もう一方の端末で「貼り付けてつなぐ」を押してね"; }
+  catch (e) { $("linkMsg").textContent = "コピーできませんでした。上のコードを長押しでコピーしてね"; }
+});
+async function redeem(raw) {
+  const c = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!c) { $("linkMsg").textContent = "コードが空です"; return; }
+  const { data, error } = await sb.rpc("redeem_link", { c });
+  if (error || !data) { $("linkMsg").textContent = "コードが違うか、期限が切れています"; return; }
+  location.reload();
+}
+$("pasteCode").addEventListener("click", async () => {
+  try { const t = await navigator.clipboard.readText(); $("codeIn").value = t; await redeem(t); }
+  catch (e) { $("linkMsg").textContent = "貼り付けできませんでした。下の欄に長押しで貼り付けて「つなぐ」を押してね"; }
+});
+$("useCode").addEventListener("click", () => redeem($("codeIn").value));
 
 $("back").addEventListener("click", () => { $("app").dataset.view = "list"; });
 </script>

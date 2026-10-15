@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title>オンラインチャット</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <style>
@@ -18,7 +18,7 @@
     }
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
+  html, body { height: var(--vh, 100dvh); margin: 0; overflow: hidden; }
   body {
     background: var(--bg); color: var(--ink);
     font-family: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", system-ui, sans-serif;
@@ -95,6 +95,10 @@
   dialog::backdrop { background: rgba(0, 0, 0, .4); }
   .dlgBtns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
   .dlgBtns button { color: var(--ink); }
+  #send { align-items: flex-end; }
+  #send button { height: 42px; }
+  #send textarea { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); resize: none; max-height: 140px; line-height: 1.4; overflow-y: auto; }
+  #kbHint { margin: 0; padding: 0 12px 8px; font-size: 11px; color: var(--sub); background: var(--panel); }
 </style>
 </head>
 <body>
@@ -131,9 +135,10 @@
     <form id="send">
       <button type="button" id="attach" aria-label="画像を送る" disabled>📎</button>
       <input type="file" id="file" accept="image/*" hidden>
-      <input id="text" maxlength="1000" placeholder="メッセージ" autocomplete="off" disabled>
+      <textarea id="text" rows="1" maxlength="1000" placeholder="メッセージ" autocomplete="off" disabled></textarea>
       <button class="primary" type="submit" disabled>送信</button>
     </form>
+    <p id="kbHint">Enter で送信 ・ Shift + Enter で改行</p>
   </section>
 </div>
 
@@ -164,6 +169,14 @@ const NG = [];   // 送れない言葉。例: ["ばか", "あほ"]
 const hasNG = (t) => NG.some((w) => w && t.includes(w));
 const q = (s) => '"' + s.replace(/(["\\])/g, "\\$1") + '"';
 const other = (r) => (r.from_name === me ? r.to_name : r.from_name);
+
+// キーボードが出ても上のバー(オンライン表示)が画面の外に押し出されないよう、見えている範囲に高さを合わせる
+if (window.visualViewport) {
+  const fit = () => { document.documentElement.style.setProperty("--vh", visualViewport.height + "px"); scrollTo(0, 0); };
+  visualViewport.addEventListener("resize", fit);
+  visualViewport.addEventListener("scroll", fit);
+  fit();
+}
 
 try { $("nameInput").value = me || localStorage.getItem("chat-name") || ""; } catch (e) { $("nameInput").value = me; }
 $("loginForm").addEventListener("submit", (e) => {
@@ -359,7 +372,7 @@ function openChat(id) {
   setEdit(null);
   if (selecting) setSelect(false);
   $("app").dataset.view = "chat";
-  $("send").querySelectorAll("input, button").forEach((x) => (x.disabled = false));
+  $("send").querySelectorAll("input, button, textarea").forEach((x) => (x.disabled = false));
   renderHead(); renderList(); renderMsgs(true); markRead();
   $("text").focus();
 }
@@ -462,10 +475,10 @@ function setEdit(id) {
 function startEdit(m) {
   if (openEl) openEl.close();
   setEdit(m.id);
-  $("text").value = m.body;
+  setText(m.body);
   $("text").focus();
 }
-$("cancelEdit").addEventListener("click", () => { setEdit(null); $("text").value = ""; });
+$("cancelEdit").addEventListener("click", () => { setEdit(null); setText(""); });
 
 // まとめて削除(相手の画面からも消える)
 async function deleteMany(ids) {
@@ -494,6 +507,7 @@ function setSelect(on) {
   if (on) setEdit(null);
   $("selbar").style.display = on ? "flex" : "none";
   $("send").style.display = on ? "none" : "";
+  $("kbHint").style.display = on ? "none" : "";
   $("msgs").classList.toggle("selecting", on);
   updSel();
   renderMsgs();
@@ -516,7 +530,7 @@ function offerCleanup() {
 }
 
 async function remove(m) {
-  if (editingId === m.id) { setEdit(null); $("text").value = ""; }
+  if (editingId === m.id) { setEdit(null); setText(""); }
   const { error } = await sb.from("messages").delete().eq("id", m.id);
   if (error) return err(error);
   if (m.image_url) sb.storage.from(BUCKET).remove([m.image_url.split("/" + BUCKET + "/")[1]]);
@@ -535,7 +549,7 @@ $("send").addEventListener("submit", async (e) => {
   const text = $("text").value.trim();
   if (!text || !current) return;
   if (hasNG(text)) { $("status").textContent = "NGワードが含まれているので送れません"; return; }
-  $("text").value = "";
+  setText("");
   try {
     if (editingId) {
       const id = editingId;
@@ -544,9 +558,23 @@ $("send").addEventListener("submit", async (e) => {
       if (error) throw error;
       replace(data); renderMsgs();
     } else await send({ body: text });
-  } catch (e2) { $("text").value = text; err(e2); }
+  } catch (e2) { setText(text); err(e2); }
 });
 
+function setText(v) { $("text").value = v; fitText(); }
+function fitText() {
+  const t = $("text");
+  t.style.height = "auto";
+  t.style.height = Math.min(t.scrollHeight, 140) + "px";
+}
+$("text").addEventListener("input", fitText);
+// Enter で送信 / Shift+Enter で改行(日本語変換の確定のEnterでは送らない)
+$("text").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  if ($("send").requestSubmit) $("send").requestSubmit();
+  else $("send").dispatchEvent(new Event("submit", { cancelable: true }));
+});
 $("text").addEventListener("input", () => {
   if (!current || Date.now() - lastTyping < 2000) return;
   lastTyping = Date.now();

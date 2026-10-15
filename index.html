@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title>オンラインチャット</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E💬%3C/text%3E%3C/svg%3E">
+<meta name="theme-color" content="#1f7a5c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <style>
   :root {
@@ -83,13 +87,14 @@
   }
   .m img { display: block; max-width: min(240px, 100%); border-radius: 8px; margin-bottom: 4px; cursor: pointer; }
   #attach { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; cursor: pointer; }
-  #selBtn { margin-left: auto; background: none; border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px; cursor: pointer; }
+  #selBtn { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px; cursor: pointer; }
   #selbar { display: none; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); background: var(--panel); }
   #selbar span { margin-right: auto; font-size: 14px; }
   #selbar button, .dlgBtns button { border: 1px solid var(--line); background: none; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
   .danger { background: #d93a3a !important; color: #fff !important; border-color: #d93a3a !important; }
   .danger:disabled { opacity: .5; cursor: not-allowed; }
   #msgs.selecting .row { cursor: pointer; }
+  #msgs.selecting .row:not(.mine) { opacity: .45; cursor: default; }
   .row.sel .m { outline: 2px solid var(--accent); }
   dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); padding: 20px; max-width: min(360px, 90vw); }
   dialog::backdrop { background: rgba(0, 0, 0, .4); }
@@ -99,6 +104,12 @@
   #send button { height: 42px; }
   #send textarea { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); resize: none; max-height: 140px; line-height: 1.4; overflow-y: auto; }
   #kbHint { margin: 0; padding: 0 12px 8px; font-size: 11px; color: var(--sub); background: var(--panel); }
+  #peerState { margin-right: auto; }
+  #favBtn { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px; cursor: pointer; }
+  #sideFoot { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px; border-top: 1px solid var(--line); }
+  #sideFoot button { background: none; border: 0; color: var(--sub); font-size: 12px; cursor: pointer; padding: 4px 6px; }
+  .seen { color: var(--sub); font-size: 11px; }
+  .m a { color: inherit; text-decoration: underline; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -121,12 +132,14 @@
     </header>
     <ul id="list"></ul>
     <p id="empty">いまオンラインの人はいません。別のタブやスマホで開くと表示されます。</p>
+    <div id="sideFoot"><button type="button" id="notifyBtn">🔔 通知 ON</button><button type="button" id="installBtn">📲 ホーム画面に追加</button></div>
   </aside>
   <section id="main">
     <header>
       <button id="back" aria-label="一覧に戻る">←</button>
       <b id="peerName">相手を選んでください</b>
       <span id="peerState"></span>
+      <button type="button" id="favBtn" style="display:none">☆ フレンド追加</button>
       <button type="button" id="selBtn">選択</button>
     </header>
     <div id="msgs"><p class="hint">左の一覧から、話したい人をクリック</p></div>
@@ -150,8 +163,34 @@
 <script>
 const SUPABASE_URL = "https://yhlldyozjcrwqltazcwz.supabase.co";
 const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
+const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
+
+// ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
+(() => {
+  const icon = (n) => {
+    const c = document.createElement("canvas");
+    c.width = c.height = n;
+    const g = c.getContext("2d");
+    g.fillStyle = "#1f7a5c"; g.fillRect(0, 0, n, n);
+    g.font = Math.round(n * 0.6) + "px serif"; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText("💬", n / 2, n * 0.54);
+    return c.toDataURL("image/png");
+  };
+  const base = location.origin + location.pathname.replace(/[^/]*$/, "");
+  const mf = {
+    name: "オンラインチャット", short_name: "チャット", start_url: base, scope: base,
+    display: "standalone", background_color: "#f3f5f2", theme_color: "#1f7a5c",
+    icons: [192, 512].map((n) => ({ src: icon(n), sizes: n + "x" + n, type: "image/png", purpose: "any" })),
+  };
+  const m = document.createElement("link");
+  m.rel = "manifest";
+  m.href = URL.createObjectURL(new Blob([JSON.stringify(mf)], { type: "application/manifest+json" }));
+  const a = document.createElement("link");
+  a.rel = "apple-touch-icon"; a.href = icon(180);
+  document.head.append(m, a);
+})();
 const qs = new URLSearchParams(location.search);
 const W = 128;                                   // スワイプで出るボタン幅
 const BUCKET = "chat-images";
@@ -163,7 +202,10 @@ let current = wantYou;
 let sb, channel, uid, online = new Set(), editingId = null, openEl = null, lastTyping = 0, ac = null;
 const logs = {};                                 // 相手の名前 -> メッセージ配列
 const typingUntil = {};
-let selecting = false, offered = false;
+let selecting = false, offered = false, installEvt = null, notifyOn = true, pushActive = false;
+try { notifyOn = localStorage.getItem("notify") !== "0"; } catch (e) {}
+let friends = new Set();
+const lastSeen = {};
 const selected = new Set();
 const NG = [];   // 送れない言葉。例: ["ばか", "あほ"]
 const hasNG = (t) => NG.some((w) => w && t.includes(w));
@@ -194,7 +236,7 @@ const unlock = () => { try { ac ||= new (window.AudioContext || window.webkitAud
 addEventListener("pointerdown", unlock);
 addEventListener("keydown", unlock);
 function beep() {
-  if (!ac || ac.state !== "running") return;
+  if (!notifyOn || !ac || ac.state !== "running") return;
   const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
   o.frequency.value = 880;
   g.gain.setValueAtTime(0.15, t);
@@ -225,7 +267,7 @@ async function start() {
     }
     uid = session.user.id;
     // 内部ID: この端末がすでに持っていればそれを使う。なければ登録し、かぶったら #XXXX を付ける(画面には出ない)
-    const rows = await sb.from("profiles").select("name");
+    const rows = await sb.from("profiles").select("name").eq("uid", uid);
     if (rows.error) throw new Error(rows.error.message + "(SQLを実行したか確認してね)");
     const found = rows.data.map((r) => r.name).find((n) => n === me || n.startsWith(me + "#"));
     if (found) me = found;
@@ -244,12 +286,16 @@ async function start() {
   } catch (e) { return fail(e.message); }
   connect();
   if (current) openChat(current);
+  paintNotify();
+  if (notifyOn) enablePush(false);
 }
 
 function connect() {
   channel = sb.channel("lobby", { config: { presence: { key: me } } });
   channel.on("presence", { event: "sync" }, () => {
+    const prev = online;
     online = new Set(Object.keys(channel.presenceState()).filter((n) => n !== me));
+    for (const id of prev) if (!online.has(id)) lastSeen[id] = Date.now();
     const before = current;
     resolveYou();
     renderList(); renderHead();
@@ -273,6 +319,8 @@ function connect() {
     }
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { loadHistory(); } });
+  setInterval(heartbeat, 60000);
+  setInterval(() => { renderList(); renderHead(); }, 30000);
 }
 
 function add(r) {
@@ -297,10 +345,12 @@ async function loadHistory() {
     .or(`from_name.eq.${q(me)},to_name.eq.${q(me)}`)
     .order("created_at", { ascending: false }).limit(500);
   if (error) return err(error);
+  await loadFriends();
   for (const k in logs) delete logs[k];
   data.forEach((r) => add(r));
   resolveYou(); renderHead(); renderList(); renderMsgs(true); markRead();
   if (!offered) { offered = true; offerCleanup(); }
+  heartbeat();
 }
 
 function onChange(p) {
@@ -310,7 +360,7 @@ function onChange(p) {
     const r = p.new;
     if (r.from_name !== me && r.to_name !== me) return;
     if (p.eventType === "UPDATE") replace(r);
-    else if (add(r) && r.from_name !== me) { typingUntil[r.from_name] = 0; beep(); }
+    else if (add(r) && r.from_name !== me) { typingUntil[r.from_name] = 0; beep(); popup(r); }
   }
   renderList(); renderMsgs(); renderHead(); markRead();
 }
@@ -327,18 +377,26 @@ function markRead() {
   renderList();
 }
 
+function ago(t) {
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  return s < 60 ? s + "秒前" : s < 3600 ? Math.floor(s / 60) + "分前" : s < 86400 ? Math.floor(s / 3600) + "時間前" : Math.floor(s / 86400) + "日前";
+}
+
 function renderHead() {
   $("peerName").textContent = current ? disp(current) : "相手を選んでください";
   $("peerState").textContent = !current ? ""
     : (typingUntil[current] || 0) > Date.now() ? "✎ 入力中…"
-    : online.has(current) ? "● オンライン" : "○ オフライン";
+    : online.has(current) ? "● オンライン"
+    : lastSeen[current] ? "○ " + ago(lastSeen[current]) + "にオンライン" : "○ オフライン";
+  $("favBtn").style.display = current ? "" : "none";
+  $("favBtn").textContent = friends.has(current) ? "★ フレンド" : "☆ フレンド追加";
 }
 
 function renderList() {
-  const people = new Set([...online, ...Object.keys(logs)]);
+  const people = new Set([...online, ...friends, ...Object.keys(logs)]);
   if (current) people.add(current);
   const ids = [...people].filter((n) => n !== me)
-    .sort((a, b) => online.has(b) - online.has(a) || a.localeCompare(b));
+    .sort((a, b) => online.has(b) - online.has(a) || friends.has(b) - friends.has(a) || a.localeCompare(b));
   $("empty").style.display = ids.length ? "none" : "block";
   const ul = $("list");
   ul.textContent = "";
@@ -353,7 +411,12 @@ function renderList() {
     if (id === current) b.setAttribute("aria-current", "true");
     const dot = document.createElement("span");
     dot.className = "dot" + (online.has(id) ? "" : " off");
-    const label = document.createElement("span"); label.textContent = disp(id);
+    const label = document.createElement("span");
+    label.textContent = (friends.has(id) ? "★ " : "") + disp(id);
+    if (!online.has(id) && lastSeen[id]) {
+      const sn = document.createElement("small"); sn.className = "seen"; sn.textContent = "  " + ago(lastSeen[id]);
+      label.append(sn);
+    }
     b.append(dot, label);
     if (n) {
       const bd = document.createElement("span");
@@ -408,7 +471,7 @@ function row(m) {
   const r = document.createElement("div");
   r.className = "row" + (mine ? " mine" : "") + (selected.has(m.id) ? " sel" : "");
   r.addEventListener("click", () => {
-    if (!selecting) return;
+    if (!selecting || !mine) return;   // 選べるのは自分のメッセージだけ
     if (selected.has(m.id)) selected.delete(m.id); else selected.add(m.id);
     r.classList.toggle("sel");
     updSel();
@@ -422,7 +485,7 @@ function row(m) {
     im.addEventListener("click", () => { if (!selecting) window.open(m.image_url, "_blank"); });
     b.append(im);
   }
-  if (m.body) b.append(document.createTextNode(m.body));
+  if (m.body) b.append(...linkify(m.body));
   const s = document.createElement("small");
   s.textContent = new Date(m.created_at).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })
     + (m.edited ? " · 編集済み" : "") + (mine && m.read_at ? " · 既読" : "");
@@ -448,6 +511,7 @@ function swipe(el, t) {
   let sx = null, x = 0, base = 0, moved = false;
   const set = (v, anim) => { t.style.transition = anim ? "" : "none"; t.style.transform = v ? `translateX(${v}px)` : ""; x = v; };
   el.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("a")) return;   // リンクのタップはスワイプにしない
     if (openEl && openEl !== el) openEl.close();
     sx = e.clientX; base = x; moved = false; el.setPointerCapture(e.pointerId);
   });
@@ -482,7 +546,7 @@ $("cancelEdit").addEventListener("click", () => { setEdit(null); setText(""); })
 
 // まとめて削除(相手の画面からも消える)
 async function deleteMany(ids) {
-  const targets = Object.values(logs).flat().filter((m) => ids.has(m.id));
+  const targets = Object.values(logs).flat().filter((m) => ids.has(m.id) && m.from_name === me);
   const done = new Set();
   for (let i = 0; i < targets.length; i += 50) {
     const { data, error } = await sb.from("messages").delete().in("id", targets.slice(i, i + 50).map((m) => m.id)).select("id");
@@ -498,7 +562,7 @@ async function deleteMany(ids) {
 
 // 複数選択モード: 選択 → タップでえらぶ → 削除
 function updSel() {
-  $("selCount").textContent = selected.size + "件選択中";
+  $("selCount").textContent = selected.size ? selected.size + "件選択中" : "自分のメッセージを選んでね";
   $("selDel").disabled = !selected.size;
 }
 function setSelect(on) {
@@ -519,11 +583,11 @@ $("selDel").addEventListener("click", async () => { await deleteMany(new Set(sel
 // 3日より前のメッセージを消すか聞く(聞くのは1日1回まで)
 function offerCleanup() {
   const cutoff = Date.now() - 3 * 864e5;
-  const old = Object.values(logs).flat().filter((m) => new Date(m.created_at) < cutoff);
+  const old = Object.values(logs).flat().filter((m) => m.from_name === me && new Date(m.created_at) < cutoff);
   if (!old.length) return;
   const key = "cleanup-asked:" + me, today = new Date().toDateString();
   try { if (localStorage.getItem(key) === today) return; } catch (e) {}
-  $("cleanMsg").textContent = "3日より前のメッセージが" + old.length + "件あります。消しますか?(相手の画面からも消えます)";
+  $("cleanMsg").textContent = "3日より前の、自分が送ったメッセージが" + old.length + "件あります。消しますか?(相手の画面からも消えます。相手が送った分は残ります)";
   $("cleanYes").onclick = async () => { $("cleanDlg").close(); await deleteMany(new Set(old.map((m) => m.id))); };
   $("cleanNo").onclick = () => { try { localStorage.setItem(key, today); } catch (e) {} $("cleanDlg").close(); };
   $("cleanDlg").showModal();
@@ -606,6 +670,101 @@ $("file").addEventListener("change", async (e) => {
     await send({ body: "", image_url: sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl });
     $("status").textContent = "接続済み";
   } catch (e2) { err(e2); }
+});
+
+function linkify(t) {
+  return t.split(/(https?:\/\/[^\s<>"'、。」』）)]+)/g).map((s, i) => {
+    if (i % 2 === 0) return document.createTextNode(s);
+    const a = document.createElement("a");
+    a.href = s; a.textContent = s; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.addEventListener("click", (e) => { if (selecting) e.preventDefault(); });
+    return a;
+  });
+}
+
+// フレンド(DBに保存されるので、オフラインでも再読み込みしても残る)
+async function loadFriends() {
+  const { data } = await sb.from("friends").select("friend_name").eq("owner_name", me);
+  if (data) friends = new Set(data.map((r) => r.friend_name));
+}
+$("favBtn").addEventListener("click", async () => {
+  if (!current) return;
+  const id = current, was = friends.has(id);
+  if (was) friends.delete(id); else friends.add(id);
+  renderHead(); renderList();
+  const { error } = was ? await sb.from("friends").delete().eq("owner_name", me).eq("friend_name", id)
+    : await sb.from("friends").insert({ owner_name: me, friend_name: id });
+  if (error) { if (was) friends.add(id); else friends.delete(id); renderHead(); renderList(); err(error); }
+});
+
+// 最後にオンラインだった時刻
+function heartbeat() {
+  sb.from("profiles").update({ last_seen: new Date().toISOString() }).eq("name", me).then(() => {});
+  const ids = [...new Set([...Object.keys(logs), ...friends, ...online])].filter((n) => n !== me);
+  if (!ids.length) return;
+  sb.from("profiles").select("name, last_seen").in("name", ids).then(({ data }) => {
+    (data || []).forEach((r) => { if (r.last_seen) lastSeen[r.name] = new Date(r.last_seen).getTime(); });
+    renderList(); renderHead();
+  });
+}
+
+// プッシュ通知 / 通知ON・OFF
+const urlB64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+function paintNotify() { $("notifyBtn").textContent = notifyOn ? "🔔 通知 ON" : "🔕 通知 OFF"; }
+async function enablePush(ask) {
+  if (!("Notification" in window)) {
+    if (ask) alert("この環境では通知が使えません。iPhone / iPad は、共有ボタン →「ホーム画面に追加」してから、そのアプリで通知をオンにしてね。");
+    return;
+  }
+  if (Notification.permission === "default" && !ask) return;
+  const perm = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+  if (perm !== "granted") { if (ask) alert("通知が許可されませんでした。ブラウザの設定で許可してね。"); return; }
+  const reg = await swReg;
+  if (!reg || !("PushManager" in window)) {
+    if (ask) alert("いまは、ページを開いている間だけ通知します。閉じていても届くプッシュ通知を使うには、sw.js も同じ場所に置いてね。");
+    return;
+  }
+  try {
+    await navigator.serviceWorker.ready;
+    const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64(VAPID_PUBLIC) });
+    const { error } = await sb.from("push_subs").upsert({ endpoint: sub.endpoint, owner_name: me, sub: sub.toJSON() }, { onConflict: "endpoint" });
+    if (error) throw error;
+    pushActive = true;
+  } catch (e) { err(e); }
+}
+async function disablePush() {
+  pushActive = false;
+  try {
+    const reg = await swReg;
+    if (!reg) return;
+    const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+    if (sub) { await sb.from("push_subs").delete().eq("endpoint", sub.endpoint); await sub.unsubscribe(); }
+  } catch (e) {}
+}
+// ページを開いたまま別のタブにいるときの通知(プッシュが使えないとき用)
+function popup(r) {
+  if (pushActive || !notifyOn || !document.hidden || !("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const n = new Notification(disp(r.from_name), { body: r.image_url ? "📷 画像" : r.body.slice(0, 80), tag: r.from_name });
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch (e) {}
+}
+$("notifyBtn").addEventListener("click", async () => {
+  notifyOn = !notifyOn;
+  try { localStorage.setItem("notify", notifyOn ? "1" : "0"); } catch (e) {}
+  paintNotify();
+  if (notifyOn) await enablePush(true); else await disablePush();
+});
+// sw.js(同じフォルダに置いたときだけ使う。閉じていても届くプッシュ通知用)
+const swReg = "serviceWorker" in navigator ? navigator.serviceWorker.register("sw.js").catch(() => null) : Promise.resolve(null);
+
+// ホーム画面に追加
+addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); installEvt = e; });
+addEventListener("appinstalled", () => { $("installBtn").style.display = "none"; });
+if (matchMedia("(display-mode: standalone)").matches || navigator.standalone) $("installBtn").style.display = "none";
+$("installBtn").addEventListener("click", () => {
+  if (installEvt) { installEvt.prompt(); installEvt = null; return; }
+  alert("iPhone / iPad: 共有ボタン →「ホーム画面に追加」\nAndroid / PC の Chrome: メニュー →「アプリをインストール」または「ホーム画面に追加」");
 });
 
 $("back").addEventListener("click", () => { $("app").dataset.view = "list"; });

@@ -115,6 +115,10 @@
   dialog button { border: 1px solid var(--line); background: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; color: var(--ink); }
   #linkDlg input { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); text-transform: uppercase; width: 16em; }
   #codeOut { display: block; font-size: 15px; letter-spacing: .08em; word-break: break-all; margin: 4px 0 12px; }
+  #callBtn { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+  #callBar { position: fixed; top: calc(8px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); z-index: 50; align-items: center; gap: 8px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; box-shadow: 0 4px 16px rgba(0, 0, 0, .25); }
+  #callBar button { border: 1px solid var(--line); background: none; border-radius: 8px; padding: 6px 12px; cursor: pointer; color: var(--ink); }
+  .ok { background: #2bb673 !important; color: #fff !important; border-color: #2bb673 !important; }
 </style>
 </head>
 <body>
@@ -145,6 +149,7 @@
       <button id="back" aria-label="一覧に戻る">←</button>
       <b id="peerName">相手を選んでください</b>
       <span id="peerState"></span>
+      <button type="button" id="callBtn" style="display:none" title="音声通話">📞</button>
       <button type="button" id="favBtn" style="display:none">☆ フレンド追加</button>
       <button type="button" id="selBtn">選択</button>
     </header>
@@ -160,6 +165,14 @@
     <p id="kbHint">Enter で送信 ・ Shift + Enter で改行</p>
   </section>
 </div>
+
+<div id="callBar" style="display:none">
+  <span id="callText"></span>
+  <button type="button" id="callAnswer" class="ok">応答</button>
+  <button type="button" id="callMute">🎙 ミュート</button>
+  <button type="button" id="callEnd" class="danger">切る</button>
+</div>
+<audio id="remoteAudio" autoplay playsinline></audio>
 
 <dialog id="linkDlg">
   <p>別の端末(Webとホーム画面のアプリなど)を、同じアカウントにつなぎます。</p>
@@ -224,7 +237,7 @@ let current = wantYou;
 let sb, channel, uid, online = new Set(), editingId = null, openEl = null, lastTyping = 0, ac = null;
 const logs = {};                                 // 相手の名前 -> メッセージ配列
 const typingUntil = {};
-let selecting = false, offered = false, installEvt = null, notifyOn = false, pushActive = false, pushEndpoint = null, fgTok = "";
+let selecting = false, offered = false, installEvt = null, notifyOn = false, pushActive = false, pushEndpoint = null, fgTok = "", callSt = null;
 try { notifyOn = localStorage.getItem("notify") === "1"; } catch (e) {}
 let friends = new Set();
 const lastSeen = {};
@@ -343,6 +356,7 @@ function connect() {
     renderHead(); setTimeout(renderHead, 3100);
   });
   channel.on("postgres_changes", { event: "*", schema: "public", table: "messages" }, onChange);
+  channel.on("postgres_changes", { event: "INSERT", schema: "public", table: "call_signals" }, onSignal);
   channel.subscribe(async (status) => {
     if (status === "SUBSCRIBED") {
       await channel.track({ name: me, nick: myNick });
@@ -387,6 +401,7 @@ async function loadHistory() {
   resolveYou(); renderHead(); renderList(); renderMsgs(true); markRead();
   if (!offered) { offered = true; offerCleanup(); }
   heartbeat();
+  checkPendingCall();
 }
 
 function onChange(p) {
@@ -425,6 +440,7 @@ function renderHead() {
     : online.has(current) ? "● オンライン"
     : lastSeen[current] ? "○ " + ago(lastSeen[current]) + "にオンライン" : "○ オフライン";
   $("favBtn").style.display = current ? "" : "none";
+  $("callBtn").style.display = current && online.has(current) && !callSt ? "" : "none";
   $("favBtn").textContent = friends.has(current) ? "★ フレンド" : "☆ フレンド追加";
 }
 
@@ -735,7 +751,7 @@ $("favBtn").addEventListener("click", async () => {
 
 // 最後にオンラインだった時刻
 function heartbeat() {
-  sb.from("profiles").update({ last_seen: new Date().toISOString() }).eq("name", me).then(() => {});
+  if (!document.hidden) sb.from("profiles").update({ last_seen: new Date().toISOString() }).eq("name", me).then(() => {});
   const ids = [...new Set([...Object.keys(logs), ...friends, ...online])].filter((n) => n !== me);
   if (!ids.length) return;
   sb.from("profiles").select("name, last_seen, nick").in("name", ids).then(({ data }) => {
@@ -785,6 +801,144 @@ async function disablePush() {
     if (sub) { await sb.from("push_subs").delete().eq("endpoint", sub.endpoint); await sub.unsubscribe(); }
   } catch (e) {}
 }
+// ===== 音声通話(WebRTC)。音声は端末どうしで直接つながり、サーバーには保存されない =====
+const ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+let ringTimer = null, callClock = null;
+
+function ringTone() {
+  if (!ac || ac.state !== "running") return;
+  [440, 480].forEach((f) => {
+    const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+    o.frequency.value = f;
+    g.gain.setValueAtTime(0.1, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(t + 0.9);
+  });
+}
+function ring(on) {
+  clearInterval(ringTimer);
+  if (on) { ringTone(); ringTimer = setInterval(ringTone, 2000); }
+}
+function showCall(text, o = {}) {
+  $("callBar").style.display = "flex";
+  $("callText").textContent = text;
+  $("callAnswer").style.display = o.answer ? "" : "none";
+  $("callMute").style.display = o.mute ? "" : "none";
+  $("callEnd").textContent = o.answer ? "拒否" : "切る";
+  renderHead();
+}
+// つなぐための信号(短時間だけ保存されて、すぐ消える。音声そのものは通らない)
+function sig(kind, data, to, id) {
+  return sb.from("call_signals").insert({ call_id: id || callSt.id, from_name: me, to_name: to || callSt.peer, kind, data: data || null });
+}
+async function startCall() {
+  if (callSt || !current || !online.has(current)) return;
+  callSt = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), peer: current, caller: true, pending: [] };
+  showCall(disp(current) + " を呼び出し中…");
+  ring(true);
+  await sig("invite", { nick: myNick });
+  callSt.timeout = setTimeout(() => endCall("応答がありませんでした"), 45000);
+}
+async function openPeer() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const pc = new RTCPeerConnection(ICE);
+  stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+  pc.ontrack = (e) => { $("remoteAudio").srcObject = e.streams[0]; };
+  pc.onicecandidate = (e) => { if (e.candidate && callSt) sig("ice", { c: e.candidate.toJSON() }); };
+  pc.onconnectionstatechange = () => {
+    if (!callSt) return;
+    if (pc.connectionState === "connected") {
+      clearTimeout(callSt.timeout);
+      const t0 = Date.now();
+      showCall("通話中 0:00", { mute: true });
+      callClock = setInterval(() => {
+        const s = Math.floor((Date.now() - t0) / 1000);
+        $("callText").textContent = "通話中 " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+      }, 1000);
+    } else if (pc.connectionState === "failed") endCall("通話がつながりませんでした");
+  };
+  callSt.pc = pc; callSt.stream = stream;
+}
+async function acceptCall() {
+  if (!callSt) return;
+  ring(false);
+  try { await openPeer(); } catch (e) { endCall("マイクが使えません(許可を確認してね)", true, "reject"); return; }
+  showCall("接続中…");
+  await sig("accept");
+}
+async function endCall(msg, tell = true, kind = "hangup") {
+  const c = callSt;
+  if (!c) return;
+  callSt = null;
+  ring(false); clearInterval(callClock); clearTimeout(c.timeout);
+  if (tell) sig(kind, null, c.peer, c.id).then(() => {}, () => {});
+  if (c.stream) c.stream.getTracks().forEach((t) => t.stop());
+  if (c.pc) c.pc.close();
+  $("remoteAudio").srcObject = null;
+  $("callBar").style.display = "none";
+  $("status").textContent = msg || "通話を終了しました";
+  renderHead();
+  setTimeout(() => sb.from("call_signals").delete().eq("call_id", c.id).then(() => {}), 1500);
+}
+async function onSignal(p) {
+  const r = p.new;
+  if (r.to_name !== me) return;
+  const k = r.kind, d = r.data || {};
+  if (k === "invite") {
+    if (callSt) { sig("busy", null, r.from_name, r.call_id); return; }
+    if (d.nick) nicks[r.from_name] = d.nick;
+    callSt = { id: r.call_id, peer: r.from_name, caller: false, pending: [] };
+    showCall(disp(r.from_name) + " から着信", { answer: true });
+    ring(true);
+    callSt.timeout = setTimeout(() => endCall("着信に応答しませんでした", true, "reject"), 45000);
+    try { if (!pushActive && document.hidden && Notification.permission === "granted") new Notification(disp(r.from_name) + " から着信"); } catch (e) {}
+    return;
+  }
+  const c = callSt;
+  if (!c || r.call_id !== c.id) return;
+  try {
+    if (k === "accept" && c.caller) {
+      await openPeer();
+      showCall("接続中…");
+      await c.pc.setLocalDescription(await c.pc.createOffer());
+      sig("offer", { sdp: c.pc.localDescription.toJSON() });
+    } else if (k === "offer" && c.pc) {
+      await c.pc.setRemoteDescription(d.sdp);
+      for (const x of c.pending.splice(0)) await c.pc.addIceCandidate(x).catch(() => {});
+      await c.pc.setLocalDescription(await c.pc.createAnswer());
+      sig("answer", { sdp: c.pc.localDescription.toJSON() });
+    } else if (k === "answer" && c.pc) {
+      await c.pc.setRemoteDescription(d.sdp);
+      for (const x of c.pending.splice(0)) await c.pc.addIceCandidate(x).catch(() => {});
+    } else if (k === "ice") {
+      if (c.pc && c.pc.remoteDescription) c.pc.addIceCandidate(d.c).catch(() => {}); else c.pending.push(d.c);
+    } else if (k === "reject") endCall("相手が応答できませんでした", false);
+    else if (k === "busy") endCall("相手は通話中です", false);
+    else if (k === "hangup") endCall("通話が終わりました", false);
+  } catch (e) { endCall("通話でエラーが起きました: " + e.message); }
+}
+// 着信の通知から開いたとき: まだ呼び出し中の着信があれば、応答画面を出す
+async function checkPendingCall() {
+  if (callSt) return;
+  const since = new Date(Date.now() - 50000).toISOString();
+  const { data } = await sb.from("call_signals").select("*").eq("to_name", me).gte("created_at", since).order("created_at");
+  if (!data) return;
+  const ended = new Set(data.filter((r) => ["hangup", "reject", "busy"].includes(r.kind)).map((r) => r.call_id));
+  const inv = data.filter((r) => r.kind === "invite" && !ended.has(r.call_id)).pop();
+  if (inv) onSignal({ new: inv });
+}
+$("callBtn").addEventListener("click", startCall);
+$("callAnswer").addEventListener("click", acceptCall);
+$("callEnd").addEventListener("click", () => {
+  if (callSt) endCall("通話を終了しました", true, callSt.caller || callSt.pc ? "hangup" : "reject");
+});
+$("callMute").addEventListener("click", () => {
+  if (!callSt || !callSt.stream) return;
+  const t = callSt.stream.getAudioTracks()[0];
+  t.enabled = !t.enabled;
+  $("callMute").textContent = t.enabled ? "🎙 ミュート" : "🔇 解除";
+});
+
 // アプリを開いて見ているあいだは、サーバーにそう伝える(その間はプッシュ通知を送らない)
 async function fgBeat() {
   if (!pushEndpoint) return;

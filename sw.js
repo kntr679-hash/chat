@@ -1,15 +1,22 @@
+// サービスワーカー: アプリを閉じているときのプッシュ通知を受け取って表示する
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
-// プッシュ通知を受け取ったら表示する(見ているときは音なし)
 self.addEventListener("push", (e) => {
   const d = e.data ? e.data.json() : {};
   e.waitUntil((async () => {
+    // (見ているときの通知は、サーバー側で送らないようにしてある)
     const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     const seeing = wins.some((c) => c.visibilityState === "visible");
     await self.registration.showNotification(d.title || "新着メッセージ", {
-      body: d.body || "", tag: d.tag,
-      silent: seeing, data: { url: d.url || "./" },
+      body: d.body || "",
+      tag: d.tag,
+      silent: seeing,
+      // 着信は、タップするまで残して、バイブも長めにする
+      requireInteraction: !!d.call,
+      vibrate: d.call ? [300, 150, 300, 150, 300, 150, 300] : undefined,
+      renotify: !!d.call,
+      data: { url: d.url || "./" },
     });
   })());
 });

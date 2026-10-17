@@ -224,7 +224,7 @@ let current = wantYou;
 let sb, channel, uid, online = new Set(), editingId = null, openEl = null, lastTyping = 0, ac = null;
 const logs = {};                                 // 相手の名前 -> メッセージ配列
 const typingUntil = {};
-let selecting = false, offered = false, installEvt = null, notifyOn = false, pushActive = false;
+let selecting = false, offered = false, installEvt = null, notifyOn = false, pushActive = false, pushEndpoint = null, fgTok = "";
 try { notifyOn = localStorage.getItem("notify") === "1"; } catch (e) {}
 let friends = new Set();
 const lastSeen = {};
@@ -767,14 +767,17 @@ async function enablePush(ask) {
     await navigator.serviceWorker.ready;
     if (ask) reg.showNotification("通知をオンにしました", { body: "新着メッセージは、こんな形で届きます" });
     const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64(VAPID_PUBLIC) });
+    pushEndpoint = sub.endpoint;
     const { error } = await sb.from("push_subs").upsert({ endpoint: sub.endpoint, owner_name: me, sub: sub.toJSON() }, { onConflict: "endpoint" });
     if (error) throw error;
     pushActive = true;
+    fgBeat();
     $("status").textContent = "プッシュ通知をオンにしました";
   } catch (e) { err(e); }
 }
 async function disablePush() {
   pushActive = false;
+  pushEndpoint = null;
   try {
     const reg = await swReg;
     if (!reg) return;
@@ -782,6 +785,25 @@ async function disablePush() {
     if (sub) { await sb.from("push_subs").delete().eq("endpoint", sub.endpoint); await sub.unsubscribe(); }
   } catch (e) {}
 }
+// アプリを開いて見ているあいだは、サーバーにそう伝える(その間はプッシュ通知を送らない)
+async function fgBeat() {
+  if (!pushEndpoint) return;
+  const { data } = await sb.auth.getSession();
+  if (data.session) fgTok = data.session.access_token;
+  fgSend(document.visibilityState === "visible" ? new Date().toISOString() : null);
+}
+function fgSend(v) {
+  if (!pushEndpoint || !fgTok) return;
+  fetch(SUPABASE_URL + "/rest/v1/push_subs?endpoint=eq." + encodeURIComponent(pushEndpoint), {
+    method: "PATCH", keepalive: true,
+    headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + fgTok, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify({ fg_at: v }),
+  }).catch(() => {});
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") fgSend(null); else fgBeat(); });
+addEventListener("pagehide", () => fgSend(null));
+setInterval(fgBeat, 8000);
+
 // ページを開いたまま別のタブにいるときの通知(プッシュが使えないとき用)
 function popup(r) {
   if (pushActive || !notifyOn || !document.hidden || !("Notification" in window) || Notification.permission !== "granted") return;

@@ -962,7 +962,7 @@ async function acceptCall() {
   clearTimeout(c.timeout);
   try { await openPeer(); } catch (e) { endCall("マイクが使えません(" + e.name + "): 許可を確認してね", true, "reject"); return; }
   if (callSt !== c) return;
-  c.timeout = setTimeout(() => endCall(NOCONN), 30000);
+  c.timeout = setTimeout(() => endCall(NOCONN), 45000);
   showCall("接続中…");
   await sig("accept");
 }
@@ -973,8 +973,17 @@ async function endCall(msg, tell = true, kind = "hangup") {
   ring(false); clearInterval(callClock); clearTimeout(c.timeout);
   if (tell) sig(kind, null, c.peer, c.id).then(() => {}, () => {});
   if (c.stream) c.stream.getTracks().forEach((t) => t.stop());
+  let pairs = "";
+  if (c.pc && msg === NOCONN) {
+    try {
+      const cnt = {};
+      (await c.pc.getStats()).forEach((r) => { if (r.type === "candidate-pair") cnt[r.state] = (cnt[r.state] || 0) + 1; });
+      pairs = " | pairs " + (Object.entries(cnt).map(([k, v]) => k + "×" + v).join(" ") || "なし");
+    } catch (e) {}
+  }
   if (c.pc) c.pc.close();
   $("remoteAudio").srcObject = null;
+  if (pairs) $("callDbg").textContent = Object.entries(c.cnt || {}).map(([k, v]) => k + (v > 1 ? "×" + v : "")).join(" ") + pairs;
   $("status").textContent = msg || "通話を終了しました";
   $("callText").textContent = msg || "通話を終了しました";
   ["callAnswer", "callMute", "callEnd"].forEach((id) => ($(id).style.display = "none"));
@@ -1012,7 +1021,7 @@ async function onSignal(p) {
       c.negotiating = true;
       clearTimeout(c.timeout);
       ring(false);
-      c.timeout = setTimeout(() => endCall(NOCONN), 30000);
+      c.timeout = setTimeout(() => endCall(NOCONN), 45000);
       await openPeer();
       showCall("接続中…");
       await c.pc.setLocalDescription(await c.pc.createOffer());

@@ -147,7 +147,7 @@
     </header>
     <ul id="list"></ul>
     <p id="empty">いまオンラインの人はいません。別のタブやスマホで開くと表示されます。</p>
-    <div id="sideFoot"><button type="button" id="notifyBtn">🔔 通知 ON</button><button type="button" id="linkOpen">🔗 他の端末とつなぐ</button><button type="button" id="installBtn">📲 ホーム画面に追加</button></div>
+    <div id="sideFoot"><button type="button" id="notifyBtn">🔔 通知 ON</button><button type="button" id="linkOpen">🔗 他の端末とつなぐ</button><button type="button" id="installBtn">📲 ホーム画面に追加</button><small id="ver" class="seen" style="width:100%;padding:0 6px"></small></div>
   </aside>
   <section id="main">
     <header>
@@ -209,6 +209,8 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
+const APP_VERSION = "10/18-relay";
+$("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
 (() => {
@@ -931,24 +933,18 @@ async function openPeer() {
     if (up || !callSt || callSt.pc !== pc) return;
     up = true;
     clearTimeout(callSt.timeout);
-    const t0 = Date.now();
-    showCall("通話中 0:00", { mute: true });
-    clearInterval(callClock);
-    callClock = setInterval(() => {
-      const s = Math.floor((Date.now() - t0) / 1000);
-      $("callText").textContent = "通話中 " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-    }, 1000);
+    showUp("通話中");
   };
   pc.onconnectionstatechange = () => {
     if (!callSt || callSt.pc !== pc) return;
     if (pc.connectionState === "connected") goUp();
-    else if (pc.connectionState === "failed") endCall(NOCONN);
+    else if (pc.connectionState === "failed") startRelay();
   };
   pc.oniceconnectionstatechange = () => {
     if (!callSt || callSt.pc !== pc) return;
     const s = pc.iceConnectionState;
     if (s === "connected" || s === "completed") goUp();
-    else if (s === "failed") endCall(NOCONN);
+    else if (s === "failed") startRelay();
     else if (!up) $("callText").textContent = "接続中… (" + s + ")";
   };
   if (callSt !== c) { stream.getTracks().forEach((t) => t.stop()); pc.close(); return; }
@@ -962,7 +958,7 @@ async function acceptCall() {
   clearTimeout(c.timeout);
   try { await openPeer(); } catch (e) { endCall("マイクが使えません(" + e.name + "): 許可を確認してね", true, "reject"); return; }
   if (callSt !== c) return;
-  c.timeout = setTimeout(() => endCall(NOCONN), 45000);
+  c.timeout = setTimeout(() => startRelay(), 12000);
   showCall("接続中…");
   await sig("accept");
 }
@@ -981,6 +977,8 @@ async function endCall(msg, tell = true, kind = "hangup") {
       pairs = " | pairs " + (Object.entries(cnt).map(([k, v]) => k + "×" + v).join(" ") || "なし");
     } catch (e) {}
   }
+  if (c.proc) { try { c.proc.disconnect(); c.src.disconnect(); } catch (e) {} }
+  if (c.relayCh) sb.removeChannel(c.relayCh);
   if (c.pc) c.pc.close();
   $("remoteAudio").srcObject = null;
   if (pairs) $("callDbg").textContent = Object.entries(c.cnt || {}).map(([k, v]) => k + (v > 1 ? "×" + v : "")).join(" ") + pairs;
@@ -1021,7 +1019,7 @@ async function onSignal(p) {
       c.negotiating = true;
       clearTimeout(c.timeout);
       ring(false);
-      c.timeout = setTimeout(() => endCall(NOCONN), 45000);
+      c.timeout = setTimeout(() => startRelay(), 12000);
       await openPeer();
       showCall("接続中…");
       await c.pc.setLocalDescription(await c.pc.createOffer());
@@ -1039,9 +1037,92 @@ async function onSignal(p) {
       if (c.pc && c.pc.remoteDescription) c.pc.addIceCandidate(d.c).catch(() => {}); else c.pending.push(d.c);
     } else if (k === "reject") endCall("相手が応答できませんでした", false);
     else if (k === "busy") endCall("相手は通話中です", false);
+    else if (k === "relay") startRelay(true);
     else if (k === "hangup") endCall("通話が終わりました", false);
   } catch (e) { endCall("通話でエラーが起きました: " + e.message); }
 }
+// ===== 予備の通話方式 =====
+// 直接つながらない回線の組み合わせのときは、自動で Supabase の中継(Realtime)に切り替えて、
+// 音声を小さく圧縮して送る。録音や保存はされない。少し遅れて、音質も少し下がる。
+const RATE = 16000, MU_BIAS = 0x84, MU_CLIP = 32635;
+function muEnc(s) {
+  const sign = (s >> 8) & 0x80;
+  if (sign) s = -s;
+  if (s > MU_CLIP) s = MU_CLIP;
+  s += MU_BIAS;
+  let exp = 7;
+  for (let mask = 0x4000; (s & mask) === 0 && exp > 0; exp--, mask >>= 1) {}
+  return ~(sign | (exp << 4) | ((s >> (exp + 3)) & 0x0f)) & 0xff;
+}
+function muDec(u) {
+  u = ~u & 0xff;
+  const sign = u & 0x80, exp = (u >> 4) & 7, man = u & 0x0f;
+  const s = (((man << 3) + MU_BIAS) << exp) - MU_BIAS;
+  return sign ? -s : s;
+}
+function showUp(label) {
+  clearInterval(callClock);
+  const t0 = Date.now();
+  showCall(label + " 0:00", { mute: true });
+  callClock = setInterval(() => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    $("callText").textContent = label + " " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  }, 1000);
+}
+function playChunk(c, d) {
+  const bin = atob(d), n = bin.length;
+  const buf = ac.createBuffer(1, n, RATE);
+  const out = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) out[i] = muDec(bin.charCodeAt(i)) / 32768;
+  const src = ac.createBufferSource();
+  src.buffer = buf; src.connect(ac.destination);
+  const now = ac.currentTime;
+  if (!c.nextT || c.nextT < now + 0.03 || c.nextT > now + 0.6) c.nextT = now + 0.15;
+  src.start(c.nextT);
+  c.nextT += buf.duration;
+}
+async function startRelay(fromPeer) {
+  const c = callSt;
+  if (!c || c.relay) return;
+  c.relay = true;
+  clearTimeout(c.timeout);
+  if (!fromPeer) sig("relay");
+  note("中継");
+  try { if (c.pc) c.pc.close(); } catch (e) {}
+  $("remoteAudio").srcObject = null;
+  unlock();
+  try { await ac.resume(); } catch (e) {}
+  showCall("中継でつなぎ中…", { mute: true });
+  const ch = sb.channel("callaudio-" + c.id, { config: { broadcast: { self: false } } });
+  c.relayCh = ch;
+  ch.on("broadcast", { event: "a" }, ({ payload }) => {
+    if (callSt !== c) return;
+    if (!c.gotAudio) { c.gotAudio = true; clearTimeout(c.timeout); showUp("通話中(中継)"); }
+    playChunk(c, payload.d);
+  });
+  await new Promise((ok) => ch.subscribe((s) => { if (s === "SUBSCRIBED") ok(); }));
+  if (callSt !== c) return;
+  const src = ac.createMediaStreamSource(c.stream);
+  const proc = ac.createScriptProcessor(4096, 1, 1);
+  const ratio = ac.sampleRate / RATE;
+  proc.onaudioprocess = (e) => {
+    const inp = e.inputBuffer.getChannelData(0);
+    const n = Math.floor(inp.length / ratio);
+    let s = "";
+    for (let i = 0; i < n; i++) {
+      const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio));
+      let sum = 0;
+      for (let j = a; j < b && j < inp.length; j++) sum += inp[j];
+      const v = Math.max(-1, Math.min(1, sum / (b - a)));
+      s += String.fromCharCode(muEnc((v * 32767) | 0));
+    }
+    ch.send({ type: "broadcast", event: "a", payload: { d: btoa(s) } });
+  };
+  src.connect(proc); proc.connect(ac.destination);
+  c.src = src; c.proc = proc;
+  c.timeout = setTimeout(() => { if (!c.gotAudio) endCall("つながりませんでした(中継でも音声が届きませんでした)"); }, 20000);
+}
+
 // 着信の通知から開いたとき: まだ呼び出し中の着信があれば、応答画面を出す
 async function checkPendingCall() {
   if (callSt) return;

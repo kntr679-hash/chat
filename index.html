@@ -440,7 +440,7 @@ function renderHead() {
     : online.has(current) ? "● オンライン"
     : lastSeen[current] ? "○ " + ago(lastSeen[current]) + "にオンライン" : "○ オフライン";
   $("favBtn").style.display = current ? "" : "none";
-  $("callBtn").style.display = current && online.has(current) && !callSt ? "" : "none";
+  $("callBtn").style.display = current && !callSt ? "" : "none";
   $("favBtn").textContent = friends.has(current) ? "★ フレンド" : "☆ フレンド追加";
 }
 
@@ -832,12 +832,13 @@ function sig(kind, data, to, id) {
   return sb.from("call_signals").insert({ call_id: id || callSt.id, from_name: me, to_name: to || callSt.peer, kind, data: data || null });
 }
 async function startCall() {
-  if (callSt || !current || !online.has(current)) return;
-  callSt = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), peer: current, caller: true, pending: [] };
-  showCall(disp(current) + " を呼び出し中…");
+  if (callSt || !current) return;
+  const c = callSt = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), peer: current, caller: true, pending: [] };
+  showCall(disp(current) + " を呼び出し中…" + (online.has(current) ? "" : "(オフライン: 通知で呼び出します)"));
   ring(true);
-  await sig("invite", { nick: myNick });
-  callSt.timeout = setTimeout(() => endCall("応答がありませんでした"), 45000);
+  c.timeout = setTimeout(() => endCall("応答がありませんでした"), 60000);
+  const { error } = await sig("invite", { nick: myNick });
+  if (error) endCall("呼び出せませんでした: " + error.message, false);
 }
 async function openPeer() {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -860,9 +861,14 @@ async function openPeer() {
   callSt.pc = pc; callSt.stream = stream;
 }
 async function acceptCall() {
-  if (!callSt) return;
+  const c = callSt;
+  if (!c || c.accepting) return;
+  c.accepting = true;
   ring(false);
-  try { await openPeer(); } catch (e) { endCall("マイクが使えません(許可を確認してね)", true, "reject"); return; }
+  clearTimeout(c.timeout);
+  try { await openPeer(); } catch (e) { endCall("マイクが使えません(" + e.name + "): 許可を確認してね", true, "reject"); return; }
+  if (callSt !== c) return;
+  c.timeout = setTimeout(() => endCall("通話がつながりませんでした"), 30000);
   showCall("接続中…");
   await sig("accept");
 }
@@ -875,8 +881,11 @@ async function endCall(msg, tell = true, kind = "hangup") {
   if (c.stream) c.stream.getTracks().forEach((t) => t.stop());
   if (c.pc) c.pc.close();
   $("remoteAudio").srcObject = null;
-  $("callBar").style.display = "none";
   $("status").textContent = msg || "通話を終了しました";
+  $("callText").textContent = msg || "通話を終了しました";
+  ["callAnswer", "callMute", "callEnd"].forEach((id) => ($(id).style.display = "none"));
+  $("callBar").style.display = "flex";
+  setTimeout(() => { if (!callSt) $("callBar").style.display = "none"; }, 3500);
   renderHead();
   setTimeout(() => sb.from("call_signals").delete().eq("call_id", c.id).then(() => {}), 1500);
 }
@@ -890,7 +899,7 @@ async function onSignal(p) {
     callSt = { id: r.call_id, peer: r.from_name, caller: false, pending: [] };
     showCall(disp(r.from_name) + " から着信", { answer: true });
     ring(true);
-    callSt.timeout = setTimeout(() => endCall("着信に応答しませんでした", true, "reject"), 45000);
+    callSt.timeout = setTimeout(() => endCall("着信に応答しませんでした", true, "reject"), 60000);
     try { if (!pushActive && document.hidden && Notification.permission === "granted") new Notification(disp(r.from_name) + " から着信"); } catch (e) {}
     return;
   }
@@ -898,6 +907,11 @@ async function onSignal(p) {
   if (!c || r.call_id !== c.id) return;
   try {
     if (k === "accept" && c.caller) {
+      if (c.negotiating) return;
+      c.negotiating = true;
+      clearTimeout(c.timeout);
+      ring(false);
+      c.timeout = setTimeout(() => endCall("通話がつながりませんでした"), 30000);
       await openPeer();
       showCall("接続中…");
       await c.pc.setLocalDescription(await c.pc.createOffer());
@@ -920,7 +934,7 @@ async function onSignal(p) {
 // 着信の通知から開いたとき: まだ呼び出し中の着信があれば、応答画面を出す
 async function checkPendingCall() {
   if (callSt) return;
-  const since = new Date(Date.now() - 50000).toISOString();
+  const since = new Date(Date.now() - 65000).toISOString();
   const { data } = await sb.from("call_signals").select("*").eq("to_name", me).gte("created_at", since).order("created_at");
   if (!data) return;
   const ended = new Set(data.filter((r) => ["hangup", "reject", "busy"].includes(r.kind)).map((r) => r.call_id));

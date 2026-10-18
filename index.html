@@ -123,6 +123,7 @@
   #attachBar img { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; }
   #attachBar span { flex: 1; min-width: 0; font-size: 13px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #attachBar button { border: 0; background: none; cursor: pointer; font-size: 18px; color: var(--sub); }
+  #callDbg { font-size: 11px; color: var(--sub); max-width: 240px; }
 </style>
 </head>
 <body>
@@ -176,7 +177,7 @@
 </div>
 
 <div id="callBar" style="display:none">
-  <span id="callText"></span>
+  <span id="callText"></span><small id="callDbg"></small>
   <button type="button" id="callAnswer" class="ok">応答</button>
   <button type="button" id="callMute">🎙 ミュート</button>
   <button type="button" id="callEnd" class="danger">切る</button>
@@ -865,13 +866,35 @@ function showCall(text, o = {}) {
   renderHead();
 }
 // つなぐための信号(短時間だけ保存されて、すぐ消える。音声そのものは通らない)
+const sigSeen = new Set();
+let sigPoll = null;
+function note(s) {
+  const c = callSt;
+  if (!c) return;
+  c.cnt = c.cnt || {};
+  c.cnt[s] = (c.cnt[s] || 0) + 1;
+  $("callDbg").textContent = Object.entries(c.cnt).map(([k, v]) => k + (v > 1 ? "×" + v : "")).join(" ");
+}
+// 合図は「その場で届く」経路と、1.5秒ごとの確認の両方で受け取る(取りこぼし対策)
+function pollSignals() {
+  clearInterval(sigPoll);
+  sigPoll = setInterval(async () => {
+    const c = callSt;
+    if (!c) { clearInterval(sigPoll); return; }
+    const { data } = await sb.from("call_signals").select("*").eq("call_id", c.id).eq("to_name", me).order("created_at");
+    (data || []).forEach((r) => onSignal({ new: r }));
+  }, 1500);
+}
 function sig(kind, data, to, id) {
+  note("↑" + kind);
   return sb.from("call_signals").insert({ call_id: id || callSt.id, from_name: me, to_name: to || callSt.peer, kind, data: data || null });
 }
 async function startCall() {
   if (callSt || !current) return;
   const c = callSt = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), peer: current, caller: true, pending: [] };
+  $("callDbg").textContent = "";
   showCall("マイクを確認中…");
+  pollSignals();
   try { c.stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
   catch (e) { endCall("マイクが使えません(" + e.name + "): 許可を確認してね", false); return; }
   if (callSt !== c) { c.stream.getTracks().forEach((t) => t.stop()); return; }
@@ -886,23 +909,43 @@ async function openPeer() {
   const stream = c.stream || await navigator.mediaDevices.getUserMedia({ audio: true });
   const pc = new RTCPeerConnection({ iceServers: STUN });
   stream.getTracks().forEach((t) => pc.addTrack(t, stream));
-  pc.ontrack = (e) => { $("remoteAudio").srcObject = e.streams[0]; };
-  pc.onicecandidate = (e) => { if (e.candidate && callSt) sig("ice", { c: e.candidate.toJSON() }); };
-  pc.onconnectionstatechange = () => {
-    if (!callSt) return;
-    if (pc.connectionState === "connected") {
-      clearTimeout(callSt.timeout);
-      const t0 = Date.now();
-      showCall("通話中 0:00", { mute: true });
-      callClock = setInterval(() => {
-        const s = Math.floor((Date.now() - t0) / 1000);
-        $("callText").textContent = "通話中 " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-      }, 1000);
-    } else if (pc.connectionState === "failed") endCall(NOCONN);
+  pc.ontrack = (e) => {
+    const a = $("remoteAudio");
+    a.srcObject = e.streams[0];
+    a.play().catch(() => {});
   };
-  // つながるまでの途中経過を、バーに出す(止まったときの原因を探すため)
+  pc.onicecandidate = (e) => {
+    if (!e.candidate || !callSt) return;
+    const m = /typ (\w+)/.exec(e.candidate.candidate || "");
+    note("c↑" + (m ? m[1] : "?"));
+    sig("ice", { c: e.candidate.toJSON() });
+  };
+  pc.onicecandidateerror = (e) => note("err" + (e.errorCode || ""));
+  // 「つながった」の判定は、ブラウザによって通知される種類が違うので、2種類とも見る
+  let up = false;
+  const goUp = () => {
+    if (up || !callSt || callSt.pc !== pc) return;
+    up = true;
+    clearTimeout(callSt.timeout);
+    const t0 = Date.now();
+    showCall("通話中 0:00", { mute: true });
+    clearInterval(callClock);
+    callClock = setInterval(() => {
+      const s = Math.floor((Date.now() - t0) / 1000);
+      $("callText").textContent = "通話中 " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+    }, 1000);
+  };
+  pc.onconnectionstatechange = () => {
+    if (!callSt || callSt.pc !== pc) return;
+    if (pc.connectionState === "connected") goUp();
+    else if (pc.connectionState === "failed") endCall(NOCONN);
+  };
   pc.oniceconnectionstatechange = () => {
-    if (callSt && callSt.pc === pc && pc.connectionState !== "connected") $("callText").textContent = "接続中… (" + pc.iceConnectionState + ")";
+    if (!callSt || callSt.pc !== pc) return;
+    const s = pc.iceConnectionState;
+    if (s === "connected" || s === "completed") goUp();
+    else if (s === "failed") endCall(NOCONN);
+    else if (!up) $("callText").textContent = "接続中… (" + s + ")";
   };
   if (callSt !== c) { stream.getTracks().forEach((t) => t.stop()); pc.close(); return; }
   c.pc = pc; c.stream = stream;
@@ -932,18 +975,24 @@ async function endCall(msg, tell = true, kind = "hangup") {
   $("callText").textContent = msg || "通話を終了しました";
   ["callAnswer", "callMute", "callEnd"].forEach((id) => ($(id).style.display = "none"));
   $("callBar").style.display = "flex";
-  setTimeout(() => { if (!callSt) $("callBar").style.display = "none"; }, 3500);
+  const hold = msg === NOCONN || /エラー|できません/.test(msg || "") ? 15000 : 3500;
+  setTimeout(() => { if (!callSt) $("callBar").style.display = "none"; }, hold);
   renderHead();
   setTimeout(() => sb.from("call_signals").delete().eq("call_id", c.id).then(() => {}), 1500);
 }
 async function onSignal(p) {
   const r = p.new;
   if (r.to_name !== me) return;
+  if (sigSeen.has(r.id)) return;
+  sigSeen.add(r.id);
   const k = r.kind, d = r.data || {};
   if (k === "invite") {
     if (callSt) { sig("busy", null, r.from_name, r.call_id); return; }
     if (d.nick) nicks[r.from_name] = d.nick;
     callSt = { id: r.call_id, peer: r.from_name, caller: false, pending: [] };
+    $("callDbg").textContent = "";
+    note("↓invite");
+    pollSignals();
     showCall(disp(r.from_name) + " から着信", { answer: true });
     ring(true);
     callSt.timeout = setTimeout(() => endCall("着信に応答しませんでした", true, "reject"), 60000);
@@ -952,6 +1001,7 @@ async function onSignal(p) {
   }
   const c = callSt;
   if (!c || r.call_id !== c.id) return;
+  note("↓" + k);
   try {
     if (k === "accept" && c.caller) {
       if (c.negotiating) return;
@@ -972,6 +1022,7 @@ async function onSignal(p) {
       await c.pc.setRemoteDescription(d.sdp);
       for (const x of c.pending.splice(0)) await c.pc.addIceCandidate(x).catch(() => {});
     } else if (k === "ice") {
+      { const m = /typ (\w+)/.exec((d.c && d.c.candidate) || ""); note("c↓" + (m ? m[1] : "?")); }
       if (c.pc && c.pc.remoteDescription) c.pc.addIceCandidate(d.c).catch(() => {}); else c.pending.push(d.c);
     } else if (k === "reject") endCall("相手が応答できませんでした", false);
     else if (k === "busy") endCall("相手は通話中です", false);

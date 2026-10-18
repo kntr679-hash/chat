@@ -885,9 +885,13 @@ function pollSignals() {
     (data || []).forEach((r) => onSignal({ new: r }));
   }, 1500);
 }
-function sig(kind, data, to, id) {
+// ※ supabase の insert は、await するか .then を付けないと、実際には送られない。
+//   ここで await するので、sig(...) を待たずに呼んでも、ちゃんと送られる
+async function sig(kind, data, to, id) {
   note("↑" + kind);
-  return sb.from("call_signals").insert({ call_id: id || callSt.id, from_name: me, to_name: to || callSt.peer, kind, data: data || null });
+  const r = await sb.from("call_signals").insert({ call_id: id || callSt.id, from_name: me, to_name: to || callSt.peer, kind, data: data || null });
+  if (r.error) note("!" + kind);
+  return r;
 }
 async function startCall() {
   if (callSt || !current) return;

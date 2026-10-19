@@ -209,7 +209,7 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
-const APP_VERSION = "10/18-relay";
+const APP_VERSION = "10/18-direct";
 $("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
@@ -922,8 +922,7 @@ async function openPeer() {
   };
   pc.onicecandidate = (e) => {
     if (!e.candidate || !callSt) return;
-    const m = /typ (\w+)/.exec(e.candidate.candidate || "");
-    note("c↑" + (m ? m[1] : "?"));
+    note("c↑" + candKind(e.candidate.candidate));
     sig("ice", { c: e.candidate.toJSON() });
   };
   pc.onicecandidateerror = (e) => note("err" + (e.errorCode || ""));
@@ -1033,7 +1032,7 @@ async function onSignal(p) {
       await c.pc.setRemoteDescription(d.sdp);
       for (const x of c.pending.splice(0)) await c.pc.addIceCandidate(x).catch(() => {});
     } else if (k === "ice") {
-      { const m = /typ (\w+)/.exec((d.c && d.c.candidate) || ""); note("c↓" + (m ? m[1] : "?")); }
+      note("c↓" + candKind(d.c && d.c.candidate));
       if (c.pc && c.pc.remoteDescription) c.pc.addIceCandidate(d.c).catch(() => {}); else c.pending.push(d.c);
     } else if (k === "reject") endCall("相手が応答できませんでした", false);
     else if (k === "busy") endCall("相手は通話中です", false);
@@ -1060,6 +1059,14 @@ function muDec(u) {
   const sign = u & 0x80, exp = (u >> 4) & 7, man = u & 0x0f;
   const s = (((man << 3) + MU_BIAS) << exp) - MU_BIAS;
   return sign ? -s : s;
+}
+// 音の通り道の候補の種類を、診断用に分類する(host=同じ回線の中 / srflx=外から見た道、mdns=名前だけ / lan=家の中のIP / v6=IPv6 / pub=外のIP)
+function candKind(cand) {
+  const m = /candidate:\S+ \d+ \w+ \d+ (\S+) \d+ typ (\w+)/.exec(cand || "");
+  if (!m) return "?";
+  const addr = m[1];
+  const a = addr.endsWith(".local") ? "mdns" : addr.includes(":") ? "v6" : /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(addr) ? "lan" : "pub";
+  return m[2] + "." + a;
 }
 function showUp(label) {
   clearInterval(callClock);

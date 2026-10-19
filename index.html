@@ -842,7 +842,7 @@ async function disablePush() {
 // 通話用の公開サーバー(STUN)。中継サーバー(TURN)は使わないので、
 // 回線の組み合わせによっては、つながらないことがある。
 const STUN = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
-const NOCONN = "つながりませんでした(回線の組み合わせによっては、この方式では届きません。Wi-Fi同士で試してね)";
+const NOCONN = "直接つながりませんでした(ルーターの設定や、回線の組み合わせが原因かも)";
 let ringTimer = null, callClock = null;
 
 function ringTone() {
@@ -913,7 +913,7 @@ async function startCall() {
 async function openPeer() {
   const c = callSt;
   const stream = c.stream || await navigator.mediaDevices.getUserMedia({ audio: true });
-  const pc = new RTCPeerConnection({ iceServers: STUN });
+  const pc = new RTCPeerConnection({ iceServers: STUN, iceCandidatePoolSize: 4 });
   stream.getTracks().forEach((t) => pc.addTrack(t, stream));
   pc.ontrack = (e) => {
     const a = $("remoteAudio");
@@ -938,13 +938,13 @@ async function openPeer() {
   pc.onconnectionstatechange = () => {
     if (!callSt || callSt.pc !== pc) return;
     if (pc.connectionState === "connected") goUp();
-    else if (pc.connectionState === "failed") startRelay();
+    else if (pc.connectionState === "failed") noConn();
   };
   pc.oniceconnectionstatechange = () => {
     if (!callSt || callSt.pc !== pc) return;
     const s = pc.iceConnectionState;
     if (s === "connected" || s === "completed") goUp();
-    else if (s === "failed") startRelay();
+    else if (s === "failed") noConn();
     else if (!up) $("callText").textContent = "接続中… (" + s + ")";
   };
   if (callSt !== c) { stream.getTracks().forEach((t) => t.stop()); pc.close(); return; }
@@ -958,7 +958,7 @@ async function acceptCall() {
   clearTimeout(c.timeout);
   try { await openPeer(); } catch (e) { endCall("マイクが使えません(" + e.name + "): 許可を確認してね", true, "reject"); return; }
   if (callSt !== c) return;
-  c.timeout = setTimeout(() => startRelay(), 12000);
+  c.timeout = setTimeout(noConn, USE_RELAY ? 12000 : 45000);
   showCall("接続中…");
   await sig("accept");
 }
@@ -1019,7 +1019,7 @@ async function onSignal(p) {
       c.negotiating = true;
       clearTimeout(c.timeout);
       ring(false);
-      c.timeout = setTimeout(() => startRelay(), 12000);
+      c.timeout = setTimeout(noConn, USE_RELAY ? 12000 : 45000);
       await openPeer();
       showCall("接続中…");
       await c.pc.setLocalDescription(await c.pc.createOffer());
@@ -1037,13 +1037,14 @@ async function onSignal(p) {
       if (c.pc && c.pc.remoteDescription) c.pc.addIceCandidate(d.c).catch(() => {}); else c.pending.push(d.c);
     } else if (k === "reject") endCall("相手が応答できませんでした", false);
     else if (k === "busy") endCall("相手は通話中です", false);
-    else if (k === "relay") startRelay(true);
+    else if (k === "relay" && USE_RELAY) startRelay(true);
     else if (k === "hangup") endCall("通話が終わりました", false);
   } catch (e) { endCall("通話でエラーが起きました: " + e.message); }
 }
 // ===== 予備の通話方式 =====
 // 直接つながらない回線の組み合わせのときは、自動で Supabase の中継(Realtime)に切り替えて、
 // 音声を小さく圧縮して送る。録音や保存はされない。少し遅れて、音質も少し下がる。
+const USE_RELAY = false;   // true にすると、直接つながらないときに、Supabase の中継に切り替える
 const RATE = 16000, MU_BIAS = 0x84, MU_CLIP = 32635;
 function muEnc(s) {
   const sign = (s >> 8) & 0x80;
@@ -1080,6 +1081,9 @@ function playChunk(c, d) {
   if (!c.nextT || c.nextT < now + 0.03 || c.nextT > now + 0.6) c.nextT = now + 0.15;
   src.start(c.nextT);
   c.nextT += buf.duration;
+}
+function noConn() {
+  if (USE_RELAY) startRelay(); else endCall(NOCONN);
 }
 async function startRelay(fromPeer) {
   const c = callSt;

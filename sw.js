@@ -2,6 +2,16 @@
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
+// ページを開くたびに、最新の index.html を取りに行く(ホーム画面のアプリが古い版を使い続けないように)
+self.addEventListener("fetch", (e) => {
+  if (e.request.mode !== "navigate") return;
+  e.respondWith(
+    fetch(e.request.url, { cache: "no-store" })
+      .then((r) => (r.redirected ? fetch(e.request) : r))
+      .catch(() => fetch(e.request)),
+  );
+});
+
 self.addEventListener("push", (e) => {
   const d = e.data ? e.data.json() : {};
   e.waitUntil((async () => {

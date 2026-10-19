@@ -209,7 +209,7 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
-const APP_VERSION = "10/18-direct";
+const APP_VERSION = "10/18-sdp";
 $("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
@@ -913,7 +913,7 @@ async function startCall() {
 async function openPeer() {
   const c = callSt;
   const stream = c.stream || await navigator.mediaDevices.getUserMedia({ audio: true });
-  const pc = new RTCPeerConnection({ iceServers: STUN, iceCandidatePoolSize: 4 });
+  const pc = new RTCPeerConnection({ iceServers: STUN });
   stream.getTracks().forEach((t) => pc.addTrack(t, stream));
   pc.ontrack = (e) => {
     const a = $("remoteAudio");
@@ -923,7 +923,7 @@ async function openPeer() {
   pc.onicecandidate = (e) => {
     if (!e.candidate || !callSt) return;
     note("c↑" + candKind(e.candidate.candidate));
-    sig("ice", { c: e.candidate.toJSON() });
+    if (callSt.descSent) sig("ice", { c: e.candidate.toJSON() });
   };
   pc.onicecandidateerror = (e) => note("err" + (e.errorCode || ""));
   // 「つながった」の判定は、ブラウザによって通知される種類が違うので、2種類とも見る
@@ -1022,13 +1022,19 @@ async function onSignal(p) {
       await openPeer();
       showCall("接続中…");
       await c.pc.setLocalDescription(await c.pc.createOffer());
+      await iceDone(c.pc);
+      c.descSent = true;
       sig("offer", { sdp: c.pc.localDescription.toJSON() });
     } else if (k === "offer" && c.pc) {
+      noteSdp(d.sdp && d.sdp.sdp);
       await c.pc.setRemoteDescription(d.sdp);
       for (const x of c.pending.splice(0)) await c.pc.addIceCandidate(x).catch(() => {});
       await c.pc.setLocalDescription(await c.pc.createAnswer());
+      await iceDone(c.pc);
+      c.descSent = true;
       sig("answer", { sdp: c.pc.localDescription.toJSON() });
     } else if (k === "answer" && c.pc) {
+      noteSdp(d.sdp && d.sdp.sdp);
       await c.pc.setRemoteDescription(d.sdp);
       for (const x of c.pending.splice(0)) await c.pc.addIceCandidate(x).catch(() => {});
     } else if (k === "ice") {
@@ -1067,6 +1073,20 @@ function candKind(cand) {
   const addr = m[1];
   const a = addr.endsWith(".local") ? "mdns" : addr.includes(":") ? "v6" : /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(addr) ? "lan" : "pub";
   return m[2] + "." + a;
+}
+// 音の通り道の候補を、1つずつ送ると取りこぼすことがあるので、集め終わってから、
+// 呼び出しの情報(offer / answer)の中に、まとめて入れて送る
+function iceDone(pc, ms = 2500) {
+  return new Promise((ok) => {
+    if (pc.iceGatheringState === "complete") return ok();
+    const t = setTimeout(ok, ms);
+    pc.addEventListener("icegatheringstatechange", () => {
+      if (pc.iceGatheringState === "complete") { clearTimeout(t); ok(); }
+    });
+  });
+}
+function noteSdp(sdp) {
+  String(sdp || "").split(/\r?\n/).filter((l) => l.startsWith("a=candidate")).forEach((l) => note("c↓" + candKind(l.slice(2))));
 }
 function showUp(label) {
   clearInterval(callClock);

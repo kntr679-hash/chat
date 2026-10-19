@@ -115,7 +115,7 @@
   dialog button { border: 1px solid var(--line); background: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; color: var(--ink); }
   #linkDlg input { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); text-transform: uppercase; width: 16em; }
   #codeOut { display: block; font-size: 15px; letter-spacing: .08em; word-break: break-all; margin: 4px 0 12px; }
-  #callBtn { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+  #callBtn, #vcallBtn { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; cursor: pointer; }
   #callBar { position: fixed; top: calc(8px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); z-index: 50; align-items: center; gap: 8px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; box-shadow: 0 4px 16px rgba(0, 0, 0, .25); }
   #callBar button { border: 1px solid var(--line); background: none; border-radius: 8px; padding: 6px 12px; cursor: pointer; color: var(--ink); }
   .ok { background: #2bb673 !important; color: #fff !important; border-color: #2bb673 !important; }
@@ -124,6 +124,9 @@
   #attachBar span { flex: 1; min-width: 0; font-size: 13px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #attachBar button { border: 0; background: none; cursor: pointer; font-size: 18px; color: var(--sub); }
   #callDbg { font-size: 11px; color: var(--sub); max-width: 240px; }
+  #videoBox { position: fixed; inset: 0; z-index: 40; background: #000; }
+  #remoteVideo { width: 100%; height: 100%; object-fit: contain; background: #000; }
+  #localVideo { position: absolute; right: 12px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); width: 28vw; max-width: 170px; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 12px; border: 1px solid rgba(255, 255, 255, .4); background: #222; transform: scaleX(-1); }
 </style>
 </head>
 <body>
@@ -155,6 +158,7 @@
       <b id="peerName">相手を選んでください</b>
       <span id="peerState"></span>
       <button type="button" id="callBtn" style="display:none" title="音声通話">📞</button>
+      <button type="button" id="vcallBtn" style="display:none" title="ビデオ通話">🎥</button>
       <button type="button" id="favBtn" style="display:none">☆ フレンド追加</button>
       <button type="button" id="selBtn">選択</button>
     </header>
@@ -176,10 +180,15 @@
   </section>
 </div>
 
+<div id="videoBox" style="display:none">
+  <video id="remoteVideo" autoplay playsinline></video>
+  <video id="localVideo" autoplay playsinline muted></video>
+</div>
 <div id="callBar" style="display:none">
   <span id="callText"></span><small id="callDbg"></small>
   <button type="button" id="callAnswer" class="ok">応答</button>
   <button type="button" id="callMute">🎙 ミュート</button>
+  <button type="button" id="callCam" style="display:none">📷 カメラ停止</button>
   <button type="button" id="callEnd" class="danger">切る</button>
 </div>
 <audio id="remoteAudio" autoplay playsinline></audio>
@@ -209,7 +218,7 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
-const APP_VERSION = "10/18-sdp";
+const APP_VERSION = "10/19-video";
 $("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
@@ -453,6 +462,7 @@ function renderHead() {
     : lastSeen[current] ? "○ " + ago(lastSeen[current]) + "にオンライン" : "○ オフライン";
   $("favBtn").style.display = current ? "" : "none";
   $("callBtn").style.display = current && !callSt ? "" : "none";
+  $("vcallBtn").style.display = current && !callSt ? "" : "none";
   $("favBtn").textContent = friends.has(current) ? "★ フレンド" : "☆ フレンド追加";
 }
 
@@ -864,6 +874,7 @@ function showCall(text, o = {}) {
   $("callText").textContent = text;
   $("callAnswer").style.display = o.answer ? "" : "none";
   $("callMute").style.display = o.mute ? "" : "none";
+  $("callCam").style.display = o.cam ? "" : "none";
   $("callEnd").textContent = o.answer ? "拒否" : "切る";
   renderHead();
 }
@@ -895,35 +906,50 @@ async function sig(kind, data, to, id) {
   if (r.error) note("!" + kind);
   return r;
 }
-async function startCall() {
+const VIDEO = { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } };
+function showLocal(stream) {
+  $("localVideo").srcObject = stream;
+  $("videoBox").style.display = "block";
+}
+async function startCall(video) {
   if (callSt || !current) return;
-  const c = callSt = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), peer: current, caller: true, pending: [] };
+  const c = callSt = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), peer: current, caller: true, pending: [], video: !!video };
   $("callDbg").textContent = "";
-  showCall("マイクを確認中…");
+  $("callCam").textContent = "📷 カメラ停止";
+  showCall(video ? "カメラとマイクを確認中…" : "マイクを確認中…");
   pollSignals();
-  try { c.stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-  catch (e) { endCall("マイクが使えません(" + e.name + "): 許可を確認してね", false); return; }
+  try { c.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: video ? VIDEO : false }); }
+  catch (e) { endCall((video ? "カメラかマイクが使えません(" : "マイクが使えません(") + e.name + "): 許可を確認してね", false); return; }
   if (callSt !== c) { c.stream.getTracks().forEach((t) => t.stop()); return; }
-  showCall(disp(current) + " を呼び出し中…" + (online.has(current) ? "" : "(オフライン: 通知で呼び出します)"));
+  if (video) showLocal(c.stream);
+  showCall(disp(current) + (video ? " をビデオで呼び出し中…" : " を呼び出し中…") + (online.has(current) ? "" : "(オフライン: 通知で呼び出します)"));
   ring(true);
   c.timeout = setTimeout(() => endCall("応答がありませんでした"), 60000);
-  const { error } = await sig("invite", { nick: myNick });
+  const { error } = await sig("invite", { nick: myNick, video: !!video });
   if (error) endCall("呼び出せませんでした: " + error.message, false);
 }
 async function openPeer() {
   const c = callSt;
-  const stream = c.stream || await navigator.mediaDevices.getUserMedia({ audio: true });
+  let stream = c.stream;
+  if (!stream) {
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: c.video ? VIDEO : false }); }
+    catch (e) {
+      if (!c.video) throw e;
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });   // カメラが使えないときは、音声だけで応じる
+      note("カメラなし");
+    }
+  }
   const pc = new RTCPeerConnection({ iceServers: STUN });
   stream.getTracks().forEach((t) => pc.addTrack(t, stream));
   pc.ontrack = (e) => {
-    const a = $("remoteAudio");
+    const a = c.video ? $("remoteVideo") : $("remoteAudio");
     a.srcObject = e.streams[0];
     a.play().catch(() => {});
   };
   pc.onicecandidate = (e) => {
     if (!e.candidate || !callSt) return;
     note("c↑" + candKind(e.candidate.candidate));
-    if (callSt.descSent) sig("ice", { c: e.candidate.toJSON() });
+    sig("ice", { c: e.candidate.toJSON() });
   };
   pc.onicecandidateerror = (e) => note("err" + (e.errorCode || ""));
   // 「つながった」の判定は、ブラウザによって通知される種類が違うので、2種類とも見る
@@ -948,6 +974,7 @@ async function openPeer() {
   };
   if (callSt !== c) { stream.getTracks().forEach((t) => t.stop()); pc.close(); return; }
   c.pc = pc; c.stream = stream;
+  if (c.video && stream.getVideoTracks().length) showLocal(stream);
 }
 async function acceptCall() {
   const c = callSt;
@@ -980,6 +1007,9 @@ async function endCall(msg, tell = true, kind = "hangup") {
   if (c.relayCh) sb.removeChannel(c.relayCh);
   if (c.pc) c.pc.close();
   $("remoteAudio").srcObject = null;
+  $("remoteVideo").srcObject = null;
+  $("localVideo").srcObject = null;
+  $("videoBox").style.display = "none";
   if (pairs) $("callDbg").textContent = Object.entries(c.cnt || {}).map(([k, v]) => k + (v > 1 ? "×" + v : "")).join(" ") + pairs;
   $("status").textContent = msg || "通話を終了しました";
   $("callText").textContent = msg || "通話を終了しました";
@@ -999,11 +1029,12 @@ async function onSignal(p) {
   if (k === "invite") {
     if (callSt) { sig("busy", null, r.from_name, r.call_id); return; }
     if (d.nick) nicks[r.from_name] = d.nick;
-    callSt = { id: r.call_id, peer: r.from_name, caller: false, pending: [] };
+    callSt = { id: r.call_id, peer: r.from_name, caller: false, pending: [], video: !!d.video };
+    $("callCam").textContent = "📷 カメラ停止";
     $("callDbg").textContent = "";
     note("↓invite");
     pollSignals();
-    showCall(disp(r.from_name) + " から着信", { answer: true });
+    showCall(disp(r.from_name) + (d.video ? " からビデオ着信" : " から着信"), { answer: true });
     ring(true);
     callSt.timeout = setTimeout(() => endCall("着信に応答しませんでした", true, "reject"), 60000);
     try { if (!pushActive && document.hidden && Notification.permission === "granted") new Notification(disp(r.from_name) + " から着信"); } catch (e) {}
@@ -1091,7 +1122,7 @@ function noteSdp(sdp) {
 function showUp(label) {
   clearInterval(callClock);
   const t0 = Date.now();
-  showCall(label + " 0:00", { mute: true });
+  showCall(label + " 0:00", { mute: true, cam: !!(callSt && callSt.video) });
   callClock = setInterval(() => {
     const s = Math.floor((Date.now() - t0) / 1000);
     $("callText").textContent = label + " " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
@@ -1164,7 +1195,14 @@ async function checkPendingCall() {
   const inv = data.filter((r) => r.kind === "invite" && !ended.has(r.call_id)).pop();
   if (inv) onSignal({ new: inv });
 }
-$("callBtn").addEventListener("click", startCall);
+$("callBtn").addEventListener("click", () => startCall(false));
+$("vcallBtn").addEventListener("click", () => startCall(true));
+$("callCam").addEventListener("click", () => {
+  const t = callSt && callSt.stream && callSt.stream.getVideoTracks()[0];
+  if (!t) return;
+  t.enabled = !t.enabled;
+  $("callCam").textContent = t.enabled ? "📷 カメラ停止" : "📷 カメラ再開";
+});
 $("callAnswer").addEventListener("click", acceptCall);
 $("callEnd").addEventListener("click", () => {
   if (callSt) endCall("通話を終了しました", true, callSt.caller || callSt.pc ? "hangup" : "reject");

@@ -221,7 +221,7 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
-const APP_VERSION = "10/19-video2";
+const APP_VERSION = "10/19-video3";
 $("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
@@ -893,14 +893,14 @@ function note(s) {
   $("callDbg").textContent = Object.entries(c.cnt).map(([k, v]) => k + (v > 1 ? "×" + v : "")).join(" ");
 }
 // 合図は「その場で届く」経路と、1.5秒ごとの確認の両方で受け取る(取りこぼし対策)
-function pollSignals() {
+function pollSignals(ms = 1500) {
   clearInterval(sigPoll);
   sigPoll = setInterval(async () => {
     const c = callSt;
     if (!c) { clearInterval(sigPoll); return; }
     const { data } = await sb.from("call_signals").select("*").eq("call_id", c.id).eq("to_name", me).order("created_at");
     (data || []).forEach((r) => onSignal({ new: r }));
-  }, 1500);
+  }, ms);
 }
 // ※ supabase の insert は、await するか .then を付けないと、実際には送られない。
 //   ここで await するので、sig(...) を待たずに呼んでも、ちゃんと送られる
@@ -956,11 +956,19 @@ async function openPeer() {
     sig("ice", { c: e.candidate.toJSON() });
   };
   pc.onicecandidateerror = (e) => note("err" + (e.errorCode || ""));
+  // 切ったことを、端末どうしで直接すぐ伝えるための小さな通り道
+  const wire = (dc) => {
+    c.dc = dc;
+    dc.onmessage = (ev) => { if (ev.data === "bye" && callSt === c) endCall("通話が終わりました", false); };
+  };
+  if (c.caller) wire(pc.createDataChannel("ctl"));
+  pc.ondatachannel = (ev) => wire(ev.channel);
   // 「つながった」の判定は、ブラウザによって通知される種類が違うので、2種類とも見る
   let up = false;
   const goUp = () => {
     if (up || !callSt || callSt.pc !== pc) return;
     up = true;
+    pollSignals(3000);
     clearTimeout(callSt.timeout);
     showUp("通話中");
   };
@@ -1000,7 +1008,11 @@ async function endCall(msg, tell = true, kind = "hangup") {
   if (!c) return;
   callSt = null;
   ring(false); clearInterval(callClock); clearTimeout(c.timeout); clearTimeout(c.dcTimer);
-  if (tell) sig(kind, null, c.peer, c.id).then(() => {}, () => {});
+  if (tell) {
+    const bye = () => sig(kind, null, c.peer, c.id).then(() => {}, () => {});
+    bye();
+    setTimeout(bye, 2500);
+  }
   if (c.stream) c.stream.getTracks().forEach((t) => t.stop());
   let pairs = "";
   if (c.pc && msg === NOCONN) {
@@ -1012,7 +1024,9 @@ async function endCall(msg, tell = true, kind = "hangup") {
   }
   if (c.proc) { try { c.proc.disconnect(); c.src.disconnect(); } catch (e) {} }
   if (c.relayCh) sb.removeChannel(c.relayCh);
-  if (c.pc) c.pc.close();
+  let closeIn = 0;
+  try { if (c.dc && c.dc.readyState === "open") { c.dc.send("bye"); closeIn = 400; } } catch (e) {}
+  if (c.pc) { if (closeIn) setTimeout(() => { try { c.pc.close(); } catch (e) {} }, closeIn); else c.pc.close(); }
   $("remoteAudio").srcObject = null;
   $("remoteVideo").srcObject = null;
   $("localVideo").srcObject = null;
@@ -1025,7 +1039,7 @@ async function endCall(msg, tell = true, kind = "hangup") {
   const hold = msg === NOCONN || /エラー|できません/.test(msg || "") ? 15000 : 3500;
   setTimeout(() => { if (!callSt) $("callBar").style.display = "none"; }, hold);
   renderHead();
-  setTimeout(() => sb.from("call_signals").delete().eq("call_id", c.id).then(() => {}), 1500);
+  setTimeout(() => sb.from("call_signals").delete().eq("call_id", c.id).then(() => {}), 20000);
 }
 async function onSignal(p) {
   const r = p.new;

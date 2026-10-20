@@ -224,7 +224,7 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
-const APP_VERSION = "10/19-video4";
+const APP_VERSION = "10/20-day";
 $("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
@@ -455,6 +455,11 @@ function markRead() {
   renderList();
 }
 
+const p2 = (n) => String(n).padStart(2, "0");
+const fmtDate = (d) => d.getFullYear() + "/" + p2(d.getMonth() + 1) + "/" + p2(d.getDate());
+const fmtTime = (d) => fmtDate(d) + " " + p2(d.getHours()) + ":" + p2(d.getMinutes());
+const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());          // 時刻を切り捨てて、その日の0時にする
+const daysAgo = (d) => Math.round((dayStart(new Date()) - dayStart(d)) / 864e5);        // 日付で数えて、何日前か
 function ago(t) {
   const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
   return s < 60 ? s + "秒前" : s < 3600 ? Math.floor(s / 60) + "分前" : s < 86400 ? Math.floor(s / 3600) + "時間前" : Math.floor(s / 86400) + "日前";
@@ -568,7 +573,7 @@ function row(m) {
   }
   if (m.body) b.append(...linkify(m.body));
   const s = document.createElement("small");
-  s.textContent = new Date(m.created_at).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })
+  s.textContent = fmtTime(new Date(m.created_at))
     + (m.edited ? " · 編集済み" : "") + (mine && m.read_at ? " · 既読" : "");
   b.append(s);
   if (mine && !selecting) {
@@ -664,12 +669,13 @@ $("selDel").addEventListener("click", async () => { await deleteMany(new Set(sel
 
 // 3日より前のメッセージを消すか聞く(聞くのは1日1回まで)
 function offerCleanup() {
-  const cutoff = Date.now() - 3 * 864e5;
-  const old = Object.values(logs).flat().filter((m) => m.from_name === me && new Date(m.created_at) < cutoff);
+  const old = Object.values(logs).flat().filter((m) => m.from_name === me && daysAgo(new Date(m.created_at)) >= 3);
   if (!old.length) return;
   const key = "cleanup-asked:" + me, today = new Date().toDateString();
   try { if (localStorage.getItem(key) === today) return; } catch (e) {}
-  $("cleanMsg").textContent = "3日より前の、自分が送ったメッセージが" + old.length + "件あります。消しますか?(相手の画面からも消えます。相手が送った分は残ります)";
+  const cut = dayStart(new Date());
+  cut.setDate(cut.getDate() - 3);
+  $("cleanMsg").textContent = fmtDate(cut) + " 以前に送った、自分のメッセージが" + old.length + "件あります。消しますか?(相手の画面からも消えます。相手が送った分は残ります)";
   $("cleanYes").onclick = async () => { $("cleanDlg").close(); await deleteMany(new Set(old.map((m) => m.id))); };
   $("cleanNo").onclick = () => { try { localStorage.setItem(key, today); } catch (e) {} $("cleanDlg").close(); };
   $("cleanDlg").showModal();

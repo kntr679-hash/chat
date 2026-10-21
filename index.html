@@ -132,6 +132,26 @@
   #callDbg { flex: 1 1 100%; max-width: none; text-align: center; }
   #updBar { position: fixed; left: 50%; top: calc(8px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); z-index: 60; align-items: center; gap: 10px; background: var(--accent); color: var(--accent-ink); padding: 8px 14px; border-radius: 999px; box-shadow: 0 4px 16px rgba(0, 0, 0, .25); font-size: 14px; }
   #updBar button { border: 0; border-radius: 999px; padding: 4px 12px; cursor: pointer; background: var(--accent-ink); color: var(--accent); font-weight: 600; }
+  /* 通話中のバーを半透明に */
+  #callBar { background: rgba(255, 255, 255, .55); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); border-color: rgba(255, 255, 255, .35); }
+  @media (prefers-color-scheme: dark) { #callBar { background: rgba(28, 35, 33, .55); border-color: rgba(255, 255, 255, .15); } }
+  /* 左の一覧を最小化(PCのみ) */
+  #side header { position: relative; }
+  #minBtn { position: absolute; right: 8px; top: 10px; border: 0; background: none; cursor: pointer; color: var(--sub); font-size: 16px; }
+  .ini { display: none; }
+  @media (max-width: 640px) { #minBtn { display: none; } }
+  @media (min-width: 641px) {
+    #app.min { grid-template-columns: 64px 1fr; }
+    #app.min #side header { height: 44px; padding: 0; }
+    #app.min #side header > :not(#minBtn) { display: none; }
+    #app.min #minBtn { position: static; width: 100%; height: 44px; }
+    #app.min #empty, #app.min #sideFoot { display: none !important; }
+    #app.min #list li button { justify-content: center; padding: 8px 0; gap: 0; position: relative; }
+    #app.min #list li button > span:not(.dot):not(.ini):not(.badge) { display: none; }
+    #app.min .ini { display: inline-flex; width: 36px; height: 36px; border-radius: 50%; background: var(--bg); align-items: center; justify-content: center; font-size: 15px; }
+    #app.min .dot { position: absolute; left: 10px; top: 8px; border: 2px solid var(--panel); box-sizing: content-box; }
+    #app.min .badge { position: absolute; right: 6px; top: 4px; }
+  }
 </style>
 </head>
 <body>
@@ -150,7 +170,7 @@
 <div id="app" data-view="list">
   <aside id="side">
     <header>
-      <b id="me"></b><button type="button" id="renameBtn" title="名前を変更">✎</button>
+      <button type="button" id="minBtn" title="一覧を最小化 / 開く">«</button><b id="me"></b><button type="button" id="renameBtn" title="名前を変更">✎</button>
       <span id="status">接続中…</span>
     </header>
     <ul id="list"></ul>
@@ -195,6 +215,8 @@
   <button type="button" id="callAnswer" class="ok">応答</button>
   <button type="button" id="callMute">🎙 ミュート</button>
   <button type="button" id="callCam" style="display:none">📷 カメラ停止</button>
+  <button type="button" id="callFlip" style="display:none">🔄 カメラ切替</button>
+  <button type="button" id="callLow" style="display:none">📉 画質を下げる</button>
   <button type="button" id="callEnd" class="danger">切る</button>
 </div>
 <audio id="remoteAudio" autoplay playsinline></audio>
@@ -224,7 +246,7 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
-const APP_VERSION = "10/20-day";
+const APP_VERSION = "10/20-cam";
 $("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
@@ -502,7 +524,10 @@ function renderList() {
       const sn = document.createElement("small"); sn.className = "seen"; sn.textContent = "  " + ago(lastSeen[id]);
       label.append(sn);
     }
-    b.append(dot, label);
+    const ini = document.createElement("span");
+    ini.className = "ini"; ini.textContent = [...disp(id)][0] || "?";
+    b.title = disp(id);
+    b.append(dot, ini, label);
     if (n) {
       const bd = document.createElement("span");
       bd.className = "badge"; bd.textContent = n;
@@ -886,7 +911,8 @@ function showCall(text, o = {}) {
   $("callText").textContent = text;
   $("callAnswer").style.display = o.answer ? "" : "none";
   $("callMute").style.display = o.mute ? "" : "none";
-  $("callCam").style.display = o.cam ? "" : "none";
+  const vid = !!(callSt && callSt.video && callSt.stream && callSt.stream.getVideoTracks().length);
+  ["callCam", "callFlip", "callLow"].forEach((id) => ($(id).style.display = vid ? "" : "none"));
   $("callEnd").style.display = "";
   $("callEnd").textContent = o.answer ? "拒否" : "切る";
   renderHead();
@@ -928,7 +954,7 @@ async function startCall(video) {
   if (callSt || !current) return;
   const c = callSt = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), peer: current, caller: true, pending: [], video: !!video };
   $("callDbg").textContent = "";
-  $("callCam").textContent = "📷 カメラ停止";
+  $("callCam").textContent = "📷 カメラ停止"; $("callLow").textContent = "📉 画質を下げる";
   showCall(video ? "カメラとマイクを確認中…" : "マイクを確認中…");
   pollSignals();
   try { c.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: video ? VIDEO : false }); }
@@ -978,6 +1004,7 @@ async function openPeer() {
     if (up || !callSt || callSt.pc !== pc) return;
     up = true;
     pollSignals(3000);
+    if (callSt.low) applyQuality();
     clearTimeout(callSt.timeout);
     showUp("通話中");
   };
@@ -1060,7 +1087,7 @@ async function onSignal(p) {
     if (callSt) { sig("busy", null, r.from_name, r.call_id); return; }
     if (d.nick) nicks[r.from_name] = d.nick;
     callSt = { id: r.call_id, peer: r.from_name, caller: false, pending: [], video: !!d.video };
-    $("callCam").textContent = "📷 カメラ停止";
+    $("callCam").textContent = "📷 カメラ停止"; $("callLow").textContent = "📉 画質を下げる";
     $("callDbg").textContent = "";
     note("↓invite");
     pollSignals();
@@ -1349,6 +1376,74 @@ $("pasteCode").addEventListener("click", async () => {
   catch (e) { $("linkMsg").textContent = "貼り付けできませんでした。下の欄に長押しで貼り付けて「つなぐ」を押してね"; }
 });
 $("useCode").addEventListener("click", () => redeem($("codeIn").value));
+
+// ===== 内カメ / 外カメ、画質 =====
+async function flipCam() {
+  const c = callSt;
+  if (!c || !c.video || !c.stream) return;
+  const old = c.stream.getVideoTracks()[0];
+  const wasOn = old ? old.enabled : true;
+  const prev = c.facing || "user";
+  const next = prev === "user" ? "environment" : "user";
+  if (old) old.stop();   // スマホは、カメラを2つ同時に使えないことがあるので、先に止める
+  let nt = null;
+  for (const f of [next, prev]) {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: f, width: { ideal: 640 }, height: { ideal: 480 } } });
+      nt = s.getVideoTracks()[0];
+      c.facing = f;
+      break;
+    } catch (e) {}
+  }
+  if (!nt) { $("status").textContent = "カメラを切り替えられませんでした"; return; }
+  nt.enabled = wasOn;
+  try {
+    const sender = c.pc && c.pc.getSenders().find((x) => x.track && x.track.kind === "video");
+    if (sender) await sender.replaceTrack(nt);
+  } catch (e) {}
+  if (old) c.stream.removeTrack(old);
+  c.stream.addTrack(nt);
+  $("localVideo").srcObject = c.stream;
+  $("localVideo").style.transform = c.facing === "user" ? "scaleX(-1)" : "none";   // 内カメだけ鏡のように反転
+  if (c.low) applyQuality();
+}
+// 画質を下げる: 送る映像を、小さく・ゆっくり・軽くして、ぼんやりとしか見えないようにする
+async function applyQuality() {
+  const c = callSt;
+  if (!c || !c.stream) return;
+  const sender = c.pc && c.pc.getSenders().find((x) => x.track && x.track.kind === "video");
+  try {
+    if (sender) {
+      const p = sender.getParameters();
+      if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+      const e = p.encodings[0];
+      if (c.low) { e.scaleResolutionDownBy = 4; e.maxBitrate = 30000; e.maxFramerate = 5; }
+      else { e.scaleResolutionDownBy = 1; delete e.maxBitrate; delete e.maxFramerate; }
+      await sender.setParameters(p);
+    }
+  } catch (e) {}
+  try {
+    const t = c.stream.getVideoTracks()[0];
+    if (t) await t.applyConstraints(c.low ? { width: 320, height: 240, frameRate: 5 } : { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } });
+  } catch (e) {}
+}
+$("callFlip").addEventListener("click", flipCam);
+$("callLow").addEventListener("click", () => {
+  const c = callSt;
+  if (!c) return;
+  c.low = !c.low;
+  $("callLow").textContent = c.low ? "📈 画質を戻す" : "📉 画質を下げる";
+  applyQuality();
+});
+
+// ===== 左の一覧を最小化 =====
+function setMin(on) {
+  $("app").classList.toggle("min", on);
+  $("minBtn").textContent = on ? "»" : "«";
+  try { localStorage.setItem("side-min", on ? "1" : "0"); } catch (e) {}
+}
+$("minBtn").addEventListener("click", () => setMin(!$("app").classList.contains("min")));
+try { setMin(localStorage.getItem("side-min") === "1"); } catch (e) {}
 
 // 新しい版が公開されたら、画面の上に「更新」を出す(古い版を使い続けないように)
 async function checkUpdate() {

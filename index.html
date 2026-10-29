@@ -142,9 +142,9 @@
   @media (max-width: 640px) { #minBtn { display: none; } }
   @media (min-width: 641px) {
     #app.min { grid-template-columns: 64px 1fr; }
-    #app.min #side header { height: 44px; padding: 0; }
+    #app.min #side header { height: 56px; padding: 0; }
     #app.min #side header > :not(#minBtn) { display: none; }
-    #app.min #minBtn { position: static; width: 100%; height: 44px; }
+    #app.min #minBtn { position: static; width: 100%; }
     #app.min #empty, #app.min #sideFoot { display: none !important; }
     #app.min #list li button { justify-content: center; padding: 8px 0; gap: 0; position: relative; }
     #app.min #list li button > span:not(.dot):not(.ini):not(.badge) { display: none; }
@@ -152,6 +152,11 @@
     #app.min .dot { position: absolute; left: 10px; top: 8px; border: 2px solid var(--panel); box-sizing: content-box; }
     #app.min .badge { position: absolute; right: 6px; top: 4px; }
   }
+  #minBtn { right: 8px; top: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font-size: 12px; padding: 4px 8px; }
+  #app.min #minBtn { white-space: pre-line; line-height: 1.25; background: var(--mine); border: 0; border-radius: 0; height: 56px; font-size: 12px; font-weight: 600; }
+  #blurRow { flex: 1 1 100%; align-items: center; gap: 10px; font-size: 13px; }
+  #blurRow input { flex: 1; min-width: 0; accent-color: var(--accent); }
+  #blurRow b { min-width: 3.2em; text-align: right; }
 </style>
 </head>
 <body>
@@ -170,7 +175,7 @@
 <div id="app" data-view="list">
   <aside id="side">
     <header>
-      <button type="button" id="minBtn" title="一覧を最小化 / 開く">«</button><b id="me"></b><button type="button" id="renameBtn" title="名前を変更">✎</button>
+      <button type="button" id="minBtn" title="左の一覧を最小化 / 開く">◀ 最小化</button><b id="me"></b><button type="button" id="renameBtn" title="名前を変更">✎</button>
       <span id="status">接続中…</span>
     </header>
     <ul id="list"></ul>
@@ -216,10 +221,12 @@
   <button type="button" id="callMute">🎙 ミュート</button>
   <button type="button" id="callCam" style="display:none">📷 カメラ停止</button>
   <button type="button" id="callFlip" style="display:none">🔄 カメラ切替</button>
-  <button type="button" id="callLow" style="display:none">📉 画質を下げる</button>
+  <button type="button" id="callBlur" style="display:none">🌫 ぼかし</button>
+  <div id="blurRow" style="display:none"><span>ぼかし</span><input type="range" id="blurRange" min="0" max="100" step="1" value="50"><b id="blurVal">50%</b></div>
   <button type="button" id="callEnd" class="danger">切る</button>
 </div>
 <audio id="remoteAudio" autoplay playsinline></audio>
+<video id="srcVideo" autoplay playsinline muted style="position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none"></video>
 
 <dialog id="linkDlg">
   <p>別の端末(Webとホーム画面のアプリなど)を、同じアカウントにつなぎます。</p>
@@ -246,7 +253,7 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
-const APP_VERSION = "10/20-cam";
+const APP_VERSION = "10/20-blur";
 $("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
@@ -912,7 +919,7 @@ function showCall(text, o = {}) {
   $("callAnswer").style.display = o.answer ? "" : "none";
   $("callMute").style.display = o.mute ? "" : "none";
   const vid = !!(callSt && callSt.video && callSt.stream && callSt.stream.getVideoTracks().length);
-  ["callCam", "callFlip", "callLow"].forEach((id) => ($(id).style.display = vid ? "" : "none"));
+  ["callCam", "callFlip", "callBlur"].forEach((id) => ($(id).style.display = vid ? "" : "none"));
   $("callEnd").style.display = "";
   $("callEnd").textContent = o.answer ? "拒否" : "切る";
   renderHead();
@@ -954,7 +961,7 @@ async function startCall(video) {
   if (callSt || !current) return;
   const c = callSt = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), peer: current, caller: true, pending: [], video: !!video };
   $("callDbg").textContent = "";
-  $("callCam").textContent = "📷 カメラ停止"; $("callLow").textContent = "📉 画質を下げる";
+  $("callCam").textContent = "📷 カメラ停止"; $("callBlur").textContent = "🌫 ぼかし"; $("blurRow").style.display = "none";
   showCall(video ? "カメラとマイクを確認中…" : "マイクを確認中…");
   pollSignals();
   try { c.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: video ? VIDEO : false }); }
@@ -1004,7 +1011,7 @@ async function openPeer() {
     if (up || !callSt || callSt.pc !== pc) return;
     up = true;
     pollSignals(3000);
-    if (callSt.low) applyQuality();
+    if (callSt.blurOn) swapSender(callSt, callSt.blurTrack);
     clearTimeout(callSt.timeout);
     showUp("通話中");
   };
@@ -1060,6 +1067,10 @@ async function endCall(msg, tell = true, kind = "hangup") {
   }
   if (c.proc) { try { c.proc.disconnect(); c.src.disconnect(); } catch (e) {} }
   if (c.relayCh) sb.removeChannel(c.relayCh);
+  clearInterval(c.blurTimer);
+  if (c.blurTrack) c.blurTrack.stop();
+  $("srcVideo").srcObject = null;
+  $("blurRow").style.display = "none";
   let closeIn = 0;
   try { if (c.dc && c.dc.readyState === "open") { c.dc.send("bye"); closeIn = 400; } } catch (e) {}
   if (c.pc) { if (closeIn) setTimeout(() => { try { c.pc.close(); } catch (e) {} }, closeIn); else c.pc.close(); }
@@ -1087,7 +1098,7 @@ async function onSignal(p) {
     if (callSt) { sig("busy", null, r.from_name, r.call_id); return; }
     if (d.nick) nicks[r.from_name] = d.nick;
     callSt = { id: r.call_id, peer: r.from_name, caller: false, pending: [], video: !!d.video };
-    $("callCam").textContent = "📷 カメラ停止"; $("callLow").textContent = "📉 画質を下げる";
+    $("callCam").textContent = "📷 カメラ停止"; $("callBlur").textContent = "🌫 ぼかし"; $("blurRow").style.display = "none";
     $("callDbg").textContent = "";
     note("↓invite");
     pollSignals();
@@ -1397,49 +1408,89 @@ async function flipCam() {
   }
   if (!nt) { $("status").textContent = "カメラを切り替えられませんでした"; return; }
   nt.enabled = wasOn;
-  try {
-    const sender = c.pc && c.pc.getSenders().find((x) => x.track && x.track.kind === "video");
-    if (sender) await sender.replaceTrack(nt);
-  } catch (e) {}
+  if (c.blurOn) $("srcVideo").srcObject = new MediaStream([nt]);   // ぼかし中は、ぼかしの元の映像だけ差し替える
+  else {
+    try {
+      const sender = c.pc && c.pc.getSenders().find((x) => x.track && x.track.kind === "video");
+      if (sender) await sender.replaceTrack(nt);
+    } catch (e) {}
+  }
   if (old) c.stream.removeTrack(old);
   c.stream.addTrack(nt);
-  $("localVideo").srcObject = c.stream;
+  if (!c.blurOn) $("localVideo").srcObject = c.stream;
   $("localVideo").style.transform = c.facing === "user" ? "scaleX(-1)" : "none";   // 内カメだけ鏡のように反転
-  if (c.low) applyQuality();
 }
-// 画質を下げる: 送る映像を、小さく・ゆっくり・軽くして、ぼんやりとしか見えないようにする
-async function applyQuality() {
-  const c = callSt;
-  if (!c || !c.stream) return;
-  const sender = c.pc && c.pc.getSenders().find((x) => x.track && x.track.kind === "video");
-  try {
-    if (sender) {
-      const p = sender.getParameters();
-      if (!p.encodings || !p.encodings.length) p.encodings = [{}];
-      const e = p.encodings[0];
-      if (c.low) { e.scaleResolutionDownBy = 4; e.maxBitrate = 30000; e.maxFramerate = 5; }
-      else { e.scaleResolutionDownBy = 1; delete e.maxBitrate; delete e.maxFramerate; }
-      await sender.setParameters(p);
-    }
-  } catch (e) {}
-  try {
-    const t = c.stream.getVideoTracks()[0];
-    if (t) await t.applyConstraints(c.low ? { width: 320, height: 240, frameRate: 5 } : { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } });
-  } catch (e) {}
+// ぼかし: 相手に送る映像を、ぼかす。0〜100%(最初は50%)で、いつでも変えられる
+const CAN_FILTER = (() => {
+  try { const x = document.createElement("canvas").getContext("2d"); x.filter = "blur(2px)"; return x.filter === "blur(2px)"; }
+  catch (e) { return false; }
+})();
+function blurDraw(c) {
+  const v = $("srcVideo");
+  if (!v.videoWidth) return;
+  const cv = c.cv, ctx = cv.getContext("2d"), w = v.videoWidth, h = v.videoHeight;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const p = c.blur / 100;
+  if (CAN_FILTER) {
+    const px = Math.round(p * 40), pad = px * 2;
+    ctx.filter = "blur(" + px + "px)";
+    ctx.drawImage(v, -pad, -pad, w + pad * 2, h + pad * 2);   // 縁が透けないように、少し大きく描く
+    ctx.filter = "none";
+  } else {
+    // フィルターが使えないブラウザ(iPhoneなど): いったん小さくして、引き伸ばしてぼかす
+    const k = 1 + p * 30;
+    const sm = c.small || (c.small = document.createElement("canvas"));
+    sm.width = Math.max(2, Math.round(w / k)); sm.height = Math.max(2, Math.round(h / k));
+    const sctx = sm.getContext("2d");
+    sctx.imageSmoothingEnabled = true; sctx.imageSmoothingQuality = "high";
+    sctx.drawImage(v, 0, 0, sm.width, sm.height);
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(sm, 0, 0, w, h);
+  }
+}
+async function swapSender(c, track) {
+  const s = c.pc && c.pc.getSenders().find((x) => x.track && x.track.kind === "video");
+  if (s && track) { try { await s.replaceTrack(track); } catch (e) {} }
+}
+function blurStart(c) {
+  const src = $("srcVideo");
+  src.srcObject = new MediaStream(c.stream.getVideoTracks());
+  src.play().catch(() => {});
+  if (!c.cv) { c.cv = document.createElement("canvas"); c.cv.width = 640; c.cv.height = 480; }
+  if (!c.blurTrack) c.blurTrack = c.cv.captureStream(24).getVideoTracks()[0];
+  clearInterval(c.blurTimer);
+  c.blurTimer = setInterval(() => blurDraw(c), 42);
+  swapSender(c, c.blurTrack);
+  $("localVideo").srcObject = new MediaStream([c.blurTrack]);   // 自分の小さい映像も、相手に見えている通りにする
+}
+function blurStop(c) {
+  clearInterval(c.blurTimer);
+  swapSender(c, c.stream.getVideoTracks()[0]);
+  $("localVideo").srcObject = c.stream;
 }
 $("callFlip").addEventListener("click", flipCam);
-$("callLow").addEventListener("click", () => {
+$("callBlur").addEventListener("click", () => {
+  const c = callSt;
+  if (!c || !c.stream) return;
+  c.blurOn = !c.blurOn;
+  if (c.blur == null) c.blur = 50;   // 最初は50%
+  $("callBlur").textContent = c.blurOn ? "🌫 ぼかしを外す" : "🌫 ぼかし";
+  $("blurRow").style.display = c.blurOn ? "flex" : "none";
+  $("blurRange").value = c.blur;
+  $("blurVal").textContent = c.blur + "%";
+  if (c.blurOn) blurStart(c); else blurStop(c);
+});
+$("blurRange").addEventListener("input", () => {
   const c = callSt;
   if (!c) return;
-  c.low = !c.low;
-  $("callLow").textContent = c.low ? "📈 画質を戻す" : "📉 画質を下げる";
-  applyQuality();
+  c.blur = +$("blurRange").value;
+  $("blurVal").textContent = c.blur + "%";
 });
 
 // ===== 左の一覧を最小化 =====
 function setMin(on) {
   $("app").classList.toggle("min", on);
-  $("minBtn").textContent = on ? "»" : "«";
+  $("minBtn").textContent = on ? "▶\n開く" : "◀ 最小化";
   try { localStorage.setItem("side-min", on ? "1" : "0"); } catch (e) {}
 }
 $("minBtn").addEventListener("click", () => setMin(!$("app").classList.contains("min")));

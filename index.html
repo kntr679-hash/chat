@@ -170,6 +170,9 @@
   #callTab.e-top { top: 0; width: 64px; height: 34px; border-radius: 0 0 14px 14px; }
   #callTab.e-bottom { bottom: 0; width: 64px; height: 34px; border-radius: 14px 14px 0 0; }
   #callTabArrow { font-size: 13px; color: var(--accent); }
+  #callBar { touch-action: none; cursor: grab; }
+  #callBar button, #callBar input { cursor: pointer; }
+  #callX { font-size: 15px; padding: 2px 10px !important; }
 </style>
 </head>
 <body>
@@ -234,6 +237,7 @@
     <span id="callGrip" title="ドラッグで移動(ダブルクリックで元の位置)">⠿</span>
     <span id="callText"></span>
     <button type="button" id="callMin" title="画面の端にしまう(バーを端へ投げても、しまえる)">しまう</button>
+    <button type="button" id="callX" style="display:none" title="閉じる">✕</button>
   </div>
   <small id="callDbg"></small>
   <button type="button" id="callAnswer" class="ok">応答</button>
@@ -272,7 +276,7 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
-const APP_VERSION = "10/20-slide";
+const APP_VERSION = "10/20-menu";
 $("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
@@ -941,6 +945,8 @@ function showCall(text, o = {}) {
   const vid = !!(callSt && callSt.video && callSt.stream && callSt.stream.getVideoTracks().length);
   ["callCam", "callFlip", "callBlur"].forEach((id) => ($(id).style.display = vid ? "" : "none"));
   $("callEnd").style.display = "";
+  $("callX").style.display = "none";
+  $("callMin").style.display = "";
   $("callEnd").textContent = o.answer ? "拒否" : "切る";
   renderHead();
 }
@@ -1101,11 +1107,15 @@ async function endCall(msg, tell = true, kind = "hangup") {
   if (pairs) $("callDbg").textContent = Object.entries(c.cnt || {}).map(([k, v]) => k + (v > 1 ? "×" + v : "")).join(" ") + pairs;
   $("status").textContent = msg || "通話を終了しました";
   $("callText").textContent = msg || "通話を終了しました";
-  ["callAnswer", "callMute", "callEnd"].forEach((id) => ($(id).style.display = "none"));
+  ["callAnswer", "callMute", "callCam", "callFlip", "callBlur", "callEnd", "callMin"].forEach((id) => ($(id).style.display = "none"));
+  $("blurRow").style.display = "none";
+  $("callX").style.display = "";
   undock(false);
   $("callBar").style.display = "flex";
+  placeBar();
   const hold = msg === NOCONN || /エラー|できません/.test(msg || "") ? 15000 : 3500;
-  setTimeout(() => { if (!callSt) $("callBar").style.display = "none"; }, hold);
+  clearTimeout(endHide);
+  endHide = setTimeout(() => { if (!callSt) $("callBar").style.display = "none"; }, hold);
   renderHead();
   setTimeout(() => sb.from("call_signals").delete().eq("call_id", c.id).then(() => {}), 20000);
 }
@@ -1451,15 +1461,15 @@ function blurDraw(c) {
   if (!v.videoWidth) return;
   const cv = c.cv, ctx = cv.getContext("2d"), w = v.videoWidth, h = v.videoHeight;
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
-  const p = c.blur / 100;
+  const f = (Math.pow(10, c.blur / 100) - 1) / 9;   // 0〜1。10^n のカーブ(最初はゆるやか、最後は急)
   if (CAN_FILTER) {
-    const px = Math.round(p * 40), pad = px * 2;
+    const px = Math.round(f * 48), pad = px * 2;
     ctx.filter = "blur(" + px + "px)";
     ctx.drawImage(v, -pad, -pad, w + pad * 2, h + pad * 2);   // 縁が透けないように、少し大きく描く
     ctx.filter = "none";
   } else {
     // フィルターが使えないブラウザ(iPhoneなど): いったん小さくして、引き伸ばしてぼかす
-    const k = 1 + p * 30;
+    const k = 1 + f * 30;
     const sm = c.small || (c.small = document.createElement("canvas"));
     sm.width = Math.max(2, Math.round(w / k)); sm.height = Math.max(2, Math.round(h / k));
     const sctx = sm.getContext("2d");
@@ -1509,10 +1519,22 @@ $("blurRange").addEventListener("input", () => {
 });
 
 // ===== 通話バーを、動かす / 端へ投げてしまう(Slide Over のように) =====
+let endHide = null;
 let dock = null;   // しまってあるとき: { edge: "left" | "right" | "top" | "bottom", pos: 端に沿った位置 }
 const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
 function saveBarPos() {
   try { localStorage.setItem("callbar-pos", JSON.stringify({ x: parseFloat($("callBar").style.left), y: parseFloat($("callBar").style.top) })); } catch (e) {}
+}
+// 画面の真ん中(横25〜75%、縦30〜70%)には、バーを置けない。重なったら、いちばん近い外側へ押し出す
+function avoidCenter(x, y, w, h) {
+  const zl = innerWidth * 0.25, zr = innerWidth * 0.75, zt = innerHeight * 0.3, zb = innerHeight * 0.7;
+  if (x >= zr || x + w <= zl || y >= zb || y + h <= zt) return { x, y };
+  const m = 4;
+  const c = [{ x, y: zt - h }, { x, y: zb }, { x: zl - w, y }, { x: zr, y }]
+    .filter((p) => p.x >= m && p.y >= m && p.x + w <= innerWidth - m && p.y + h <= innerHeight - m);
+  if (!c.length) return { x, y };
+  c.sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y));
+  return c[0];
 }
 function placeBar() {
   const bar = $("callBar");
@@ -1520,11 +1542,16 @@ function placeBar() {
   try { p = JSON.parse(localStorage.getItem("callbar-pos") || "null"); } catch (e) {}
   if (!p) { bar.style.left = ""; bar.style.top = ""; bar.style.transform = ""; return; }
   const r = bar.getBoundingClientRect();
-  bar.style.left = clampN(p.x, 4, innerWidth - r.width - 4) + "px";
-  bar.style.top = clampN(p.y, 4, innerHeight - r.height - 4) + "px";
+  const a = avoidCenter(clampN(p.x, 4, innerWidth - r.width - 4), clampN(p.y, 4, innerHeight - r.height - 4), r.width, r.height);
+  bar.style.left = a.x + "px";
+  bar.style.top = a.y + "px";
   bar.style.transform = "none";
 }
-function barSpot(edge, pos, w, h) {   // 引き出したときの、画面の中の位置
+function barSpot(edge, pos, w, h) {
+  const p = barSpot0(edge, pos, w, h);
+  return avoidCenter(p.x, p.y, w, h);
+}
+function barSpot0(edge, pos, w, h) {   // 引き出したときの、画面の中の位置
   const m = 10;
   if (edge === "left") return { x: m, y: clampN(pos - h / 2, m, innerHeight - h - m) };
   if (edge === "right") return { x: innerWidth - w - m, y: clampN(pos - h / 2, m, innerHeight - h - m) };
@@ -1595,8 +1622,9 @@ function dragBar(e) {
   bar.style.transform = "none"; bar.style.left = r.left + "px"; bar.style.top = r.top + "px";
   const pts = [];
   const move = (ev) => {
-    bar.style.left = clampN(ev.clientX - dx, 4, innerWidth - bar.offsetWidth - 4) + "px";
-    bar.style.top = clampN(ev.clientY - dy, 4, innerHeight - bar.offsetHeight - 4) + "px";
+    const a = avoidCenter(clampN(ev.clientX - dx, 4, innerWidth - bar.offsetWidth - 4), clampN(ev.clientY - dy, 4, innerHeight - bar.offsetHeight - 4), bar.offsetWidth, bar.offsetHeight);
+    bar.style.left = a.x + "px";
+    bar.style.top = a.y + "px";
     pts.push({ x: ev.clientX, y: ev.clientY, t: performance.now() });
     if (pts.length > 8) pts.shift();
   };
@@ -1659,8 +1687,8 @@ function pullTab(e) {
   addEventListener("pointerup", up);
   addEventListener("pointercancel", up);
 }
-$("callGrip").addEventListener("pointerdown", dragBar);
-$("callText").addEventListener("pointerdown", dragBar);
+$("callBar").addEventListener("pointerdown", (e) => { if (!e.target.closest("button, input, a")) dragBar(e); });
+$("callX").addEventListener("click", () => { clearTimeout(endHide); if (!callSt) $("callBar").style.display = "none"; });
 $("callTab").addEventListener("pointerdown", pullTab);
 $("callGrip").addEventListener("dblclick", () => { try { localStorage.removeItem("callbar-pos"); } catch (e) {} placeBar(); });
 // 「しまう」ボタン: いちばん近い端にしまう

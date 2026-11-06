@@ -155,7 +155,6 @@
   #minBtn { right: 8px; top: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font-size: 12px; padding: 4px 8px; }
   #app.min #minBtn { white-space: pre-line; line-height: 1.25; background: var(--mine); border: 0; border-radius: 0; height: 56px; font-size: 12px; font-weight: 600; }
   #blurRow { flex: 1 1 100%; align-items: center; gap: 10px; font-size: 13px; }
-  #blurRow input { flex: 1; min-width: 0; accent-color: var(--accent); }
   #blurRow b { min-width: 3.2em; text-align: right; }
   #callHead { flex: 1 1 100%; display: flex; align-items: center; gap: 8px; }
   #callGrip { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; padding: 2px 6px; font-size: 20px; line-height: 1; color: var(--sub); }
@@ -173,6 +172,20 @@
   #callBar { touch-action: none; cursor: grab; }
   #callBar button, #callBar input { cursor: pointer; }
   #callX { font-size: 15px; padding: 2px 10px !important; }
+  /* 効果の強さのスライダー(100%を超えて引っ張ると伸びて、約1秒で「破れる」) */
+  .sl { flex: 1 1 120px; min-width: 120px; height: 30px; position: relative; touch-action: none; cursor: pointer; }
+  #fxTrack { position: absolute; left: 0; right: 0; top: 13px; height: 4px; border-radius: 4px; background: rgba(127, 127, 127, .4); transform-origin: left center; transition: transform .35s cubic-bezier(.3, 1.8, .5, 1); }
+  #fxFill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--accent); }
+  #fxFill2 { position: absolute; top: 0; bottom: 0; background: #e8590c; border-radius: 0 4px 4px 0; }
+  #fxTick { position: absolute; top: -4px; bottom: -4px; width: 2px; background: #e8590c; display: none; }
+  #fxKnob { position: absolute; top: 5px; width: 20px; height: 20px; margin-left: -10px; border-radius: 50%; background: var(--accent); border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .4); transition: left .35s cubic-bezier(.3, 1.8, .5, 1); }
+  .sl.drag #fxTrack, .sl.drag #fxKnob { transition: none; }
+  .sl.strain #fxTrack { background: rgba(232, 89, 12, .6); animation: strain .1s linear infinite alternate; }
+  .sl.tear #fxTrack { animation: tear .6s ease-out; }
+  .sl.broken #fxKnob { background: #e8590c; }
+  #blurVal.over { color: #e8590c; }
+  @keyframes strain { from { top: 12px; } to { top: 14px; } }
+  @keyframes tear { 0% { height: 4px; } 25% { height: 12px; background: #e8590c; } 100% { height: 4px; } }
 </style>
 </head>
 <body>
@@ -245,7 +258,8 @@
   <button type="button" id="callCam" style="display:none">📷 カメラ停止</button>
   <button type="button" id="callFlip" style="display:none">🔄 カメラ切替</button>
   <button type="button" id="callBlur" style="display:none">🌫 ぼかし</button>
-  <div id="blurRow" style="display:none"><span>ぼかし</span><input type="range" id="blurRange" min="0" max="100" step="1" value="50"><b id="blurVal">50%</b></div>
+  <button type="button" id="callMosaic" style="display:none">🔲 モザイク</button>
+  <div id="blurRow" style="display:none"><span id="fxName">ぼかし</span><div id="fxSlider" class="sl"><div id="fxTrack"><div id="fxFill"></div><div id="fxFill2"></div><div id="fxTick"></div></div><div id="fxKnob"></div></div><b id="blurVal">50%</b></div>
   <button type="button" id="callEnd" class="danger">切る</button>
 </div>
 <audio id="remoteAudio" autoplay playsinline></audio>
@@ -276,7 +290,7 @@ const SUPABASE_KEY = "sb_publishable_9B7dmMZ859WHV5BMswweBA_c8OHLSbt";
 const VAPID_PUBLIC = "BHrCgXz9hZBghyfVc4UnivKAfsJgl6QOIn8HlEas5vm3YVJKe2RZa2YvWRS1Ru1-WnW4YKcYamwSwvRaCH0dEcA";   // プッシュ通知用の公開キー
 
 const $ = (id) => document.getElementById(id);
-const APP_VERSION = "10/20-menu";
+const APP_VERSION = "10/20-fx2";
 $("ver").textContent = "版 " + APP_VERSION;
 
 // ホーム画面用のアイコンとmanifestは、別ファイルを使わずページの中で作る
@@ -943,7 +957,7 @@ function showCall(text, o = {}) {
   $("callAnswer").style.display = o.answer ? "" : "none";
   $("callMute").style.display = o.mute ? "" : "none";
   const vid = !!(callSt && callSt.video && callSt.stream && callSt.stream.getVideoTracks().length);
-  ["callCam", "callFlip", "callBlur"].forEach((id) => ($(id).style.display = vid ? "" : "none"));
+  ["callCam", "callFlip", "callBlur", "callMosaic"].forEach((id) => ($(id).style.display = vid ? "" : "none"));
   $("callEnd").style.display = "";
   $("callX").style.display = "none";
   $("callMin").style.display = "";
@@ -987,7 +1001,7 @@ async function startCall(video) {
   if (callSt || !current) return;
   const c = callSt = { id: Date.now() + "-" + Math.random().toString(36).slice(2, 8), peer: current, caller: true, pending: [], video: !!video };
   $("callDbg").textContent = "";
-  $("callCam").textContent = "📷 カメラ停止"; $("callBlur").textContent = "🌫 ぼかし"; $("blurRow").style.display = "none";
+  $("callCam").textContent = "📷 カメラ停止"; $("callBlur").textContent = "🌫 ぼかし"; $("callMosaic").textContent = "🔲 モザイク"; $("blurRow").style.display = "none";
   showCall(video ? "カメラとマイクを確認中…" : "マイクを確認中…");
   pollSignals();
   try { c.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: video ? VIDEO : false }); }
@@ -1107,7 +1121,7 @@ async function endCall(msg, tell = true, kind = "hangup") {
   if (pairs) $("callDbg").textContent = Object.entries(c.cnt || {}).map(([k, v]) => k + (v > 1 ? "×" + v : "")).join(" ") + pairs;
   $("status").textContent = msg || "通話を終了しました";
   $("callText").textContent = msg || "通話を終了しました";
-  ["callAnswer", "callMute", "callCam", "callFlip", "callBlur", "callEnd", "callMin"].forEach((id) => ($(id).style.display = "none"));
+  ["callAnswer", "callMute", "callCam", "callFlip", "callBlur", "callMosaic", "callEnd", "callMin"].forEach((id) => ($(id).style.display = "none"));
   $("blurRow").style.display = "none";
   $("callX").style.display = "";
   undock(false);
@@ -1129,7 +1143,7 @@ async function onSignal(p) {
     if (callSt) { sig("busy", null, r.from_name, r.call_id); return; }
     if (d.nick) nicks[r.from_name] = d.nick;
     callSt = { id: r.call_id, peer: r.from_name, caller: false, pending: [], video: !!d.video };
-    $("callCam").textContent = "📷 カメラ停止"; $("callBlur").textContent = "🌫 ぼかし"; $("blurRow").style.display = "none";
+    $("callCam").textContent = "📷 カメラ停止"; $("callBlur").textContent = "🌫 ぼかし"; $("callMosaic").textContent = "🔲 モザイク"; $("blurRow").style.display = "none";
     $("callDbg").textContent = "";
     note("↓invite");
     pollSignals();
@@ -1452,32 +1466,69 @@ async function flipCam() {
   $("localVideo").style.transform = c.facing === "user" ? "scaleX(-1)" : "none";   // 内カメだけ鏡のように反転
 }
 // ぼかし: 相手に送る映像を、ぼかす。0〜100%(最初は50%)で、いつでも変えられる
+// canvas の blur フィルターが「本当に効くか」を、実際に1回描いて確かめる
 const CAN_FILTER = (() => {
-  try { const x = document.createElement("canvas").getContext("2d"); x.filter = "blur(2px)"; return x.filter === "blur(2px)"; }
-  catch (e) { return false; }
+  try {
+    const a = document.createElement("canvas"); a.width = 8; a.height = 8;
+    const x = a.getContext("2d");
+    x.fillStyle = "#000"; x.fillRect(0, 0, 4, 8); x.fillStyle = "#fff"; x.fillRect(4, 0, 4, 8);
+    const b = document.createElement("canvas"); b.width = 8; b.height = 8;
+    const y = b.getContext("2d", { willReadFrequently: true });
+    y.filter = "blur(2px)"; y.drawImage(a, 0, 0);
+    const p = y.getImageData(3, 4, 1, 1).data[0];   // 境目のすぐ左: ぼけていれば、真っ黒ではなくなる
+    return p > 10 && p < 245;
+  } catch (e) { return false; }
 })();
+// フィルターが使えないブラウザ(iPhoneなど): 半分ずつ小さくして、半分ずつ戻して、なめらかにぼかす
+function pyrBlur(c, v, ctx, w, h, px) {
+  const steps = Math.max(1, Math.min(6, Math.round(Math.log2(1 + px / 2))));
+  c.pyr = c.pyr || [];
+  let src = v, sw = w, sh = h;
+  const ds = [];
+  for (let i = 0; i < steps; i++) {
+    sw = Math.max(2, Math.round(sw / 2)); sh = Math.max(2, Math.round(sh / 2));
+    const cv = c.pyr[i] || (c.pyr[i] = document.createElement("canvas"));
+    cv.width = sw; cv.height = sh;
+    const x = cv.getContext("2d");
+    x.imageSmoothingEnabled = true; x.imageSmoothingQuality = "high";
+    x.drawImage(src, 0, 0, sw, sh);
+    src = cv; ds.push(cv);
+  }
+  for (let i = steps - 2; i >= 0; i--) {
+    const x = ds[i].getContext("2d");
+    x.imageSmoothingEnabled = true; x.imageSmoothingQuality = "high";
+    x.drawImage(ds[i + 1], 0, 0, ds[i].width, ds[i].height);
+  }
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(ds[0], 0, 0, w, h);
+}
 function blurDraw(c) {
   const v = $("srcVideo");
   if (!v.videoWidth) return;
   const cv = c.cv, ctx = cv.getContext("2d"), w = v.videoWidth, h = v.videoHeight;
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
-  const f = (Math.pow(10, c.blur / 100) - 1) / 9;   // 0〜1。10^n のカーブ(最初はゆるやか、最後は急)
-  if (CAN_FILTER) {
-    const px = Math.round(f * 48), pad = px * 2;
-    ctx.filter = "blur(" + px + "px)";
-    ctx.drawImage(v, -pad, -pad, w + pad * 2, h + pad * 2);   // 縁が透けないように、少し大きく描く
-    ctx.filter = "none";
-  } else {
-    // フィルターが使えないブラウザ(iPhoneなど): いったん小さくして、引き伸ばしてぼかす
-    const k = 1 + f * 30;
+  const val = c.fx === "mosaic" ? c.mosaic : c.blur;
+  const f = (Math.pow(10, val / 100) - 1) / 9;   // 10^n のカーブ(最初はゆるやか、最後は急)。100%を超えると、さらに急になる
+  if (c.fx === "mosaic") {
+    const cell = 1 + Math.min(f * 40, 400) * (w / 640);   // 1マスの大きさ(px)
     const sm = c.small || (c.small = document.createElement("canvas"));
-    sm.width = Math.max(2, Math.round(w / k)); sm.height = Math.max(2, Math.round(h / k));
-    const sctx = sm.getContext("2d");
-    sctx.imageSmoothingEnabled = true; sctx.imageSmoothingQuality = "high";
-    sctx.drawImage(v, 0, 0, sm.width, sm.height);
-    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+    sm.width = Math.max(1, Math.round(w / cell)); sm.height = Math.max(1, Math.round(h / cell));
+    sm.getContext("2d").drawImage(v, 0, 0, sm.width, sm.height);
+    ctx.imageSmoothingEnabled = false;   // 引き伸ばすときに、なめらかにしない → 四角いモザイクになる
     ctx.drawImage(sm, 0, 0, w, h);
+    return;
   }
+  ctx.imageSmoothingEnabled = true;
+  ctx.filter = "none";
+  const px = Math.min(200, f * 48) * (w / 640);   // 画面の大きさが変わっても、同じぼけ具合になるようにそろえる
+  if (px < 0.5) { ctx.drawImage(v, 0, 0, w, h); return; }
+  if (CAN_FILTER) {
+    ctx.drawImage(v, 0, 0, w, h);                  // 下に元の映像を敷く(ぼかした縁が透けないように)
+    const pad = Math.min(px, w * 0.03);            // 縁を埋めるための拡大は、最大でも3%まで(拡大に見えないように)
+    ctx.filter = "blur(" + px.toFixed(1) + "px)";
+    ctx.drawImage(v, -pad, -pad, w + pad * 2, h + pad * 2);
+    ctx.filter = "none";
+  } else pyrBlur(c, v, ctx, w, h, px);
 }
 async function swapSender(c, track) {
   const s = c.pc && c.pc.getSenders().find((x) => x.track && x.track.kind === "video");
@@ -1500,22 +1551,91 @@ function blurStop(c) {
   $("localVideo").srcObject = c.stream;
 }
 $("callFlip").addEventListener("click", flipCam);
-$("callBlur").addEventListener("click", () => {
+// ===== 映像の加工(ぼかし / モザイク)と、強さのスライダー =====
+const FX_NAME = { blur: "ぼかし", mosaic: "モザイク" };
+const fxVal = (c) => (c.fx === "mosaic" ? c.mosaic : c.blur);
+const fxScale = (c) => (c.unlocked ? 200 : 100);   // ふだんは0〜100%。「破れる」と0〜200%
+function setFxVal(c, v) { if (c.fx === "mosaic") c.mosaic = v; else c.blur = v; }
+function paintFx(c, stretch = 0) {
+  const sl = $("fxSlider"), w = sl.clientWidth || 1, v = fxVal(c), sc = fxScale(c);
+  $("fxFill").style.width = (Math.min(v, 100) / sc) * 100 + "%";
+  $("fxFill2").style.left = (100 / sc) * 100 + "%";
+  $("fxFill2").style.width = (Math.max(0, v - 100) / sc) * 100 + "%";
+  $("fxTick").style.display = c.unlocked ? "block" : "none";
+  $("fxTick").style.left = (100 / sc) * 100 + "%";
+  $("fxTrack").style.transform = stretch ? "scaleX(" + (1 + stretch / w) + ")" : "";
+  $("fxKnob").style.left = (v / sc) * w + stretch + "px";
+  $("blurVal").textContent = v + "%";
+  $("blurVal").classList.toggle("over", v > 100);
+  $("fxName").textContent = FX_NAME[c.fx] + (c.unlocked ? "(上限解除)" : "");
+  sl.classList.toggle("broken", !!c.unlocked);
+}
+function toggleFx(kind) {
   const c = callSt;
   if (!c || !c.stream) return;
-  c.blurOn = !c.blurOn;
-  if (c.blur == null) c.blur = 50;   // 最初は50%
-  $("callBlur").textContent = c.blurOn ? "🌫 ぼかしを外す" : "🌫 ぼかし";
-  $("blurRow").style.display = c.blurOn ? "flex" : "none";
-  $("blurRange").value = c.blur;
-  $("blurVal").textContent = c.blur + "%";
-  if (c.blurOn) blurStart(c); else blurStop(c);
-});
-$("blurRange").addEventListener("input", () => {
+  if (c.fx === kind) { c.fx = null; c.blurOn = false; blurStop(c); }
+  else {
+    const was = c.blurOn;
+    c.fx = kind; c.blurOn = true;
+    if (c.blur == null) c.blur = 50;     // 最初は50%
+    if (c.mosaic == null) c.mosaic = 50;
+    if (!was) blurStart(c);
+  }
+  $("callBlur").textContent = c.fx === "blur" ? "🌫 ぼかしを外す" : "🌫 ぼかし";
+  $("callMosaic").textContent = c.fx === "mosaic" ? "🔲 モザイクを外す" : "🔲 モザイク";
+  $("blurRow").style.display = c.fx ? "flex" : "none";
+  if (c.fx) paintFx(c, 0);
+}
+$("callBlur").addEventListener("click", () => toggleFx("blur"));
+$("callMosaic").addEventListener("click", () => toggleFx("mosaic"));
+// スライダー: 右の端より先へ引っ張ると、ゴムのように少し伸びる。伸びたまま約1秒たつと「破れて」、100%を超えて設定できる
+$("fxSlider").addEventListener("pointerdown", (e) => {
   const c = callSt;
-  if (!c) return;
-  c.blur = +$("blurRange").value;
-  $("blurVal").textContent = c.blur + "%";
+  if (!c || !c.fx) return;
+  e.preventDefault();
+  const sl = $("fxSlider"), box = sl.getBoundingClientRect();
+  sl.setPointerCapture(e.pointerId);
+  sl.classList.add("drag");
+  let anchor = null, lastX = e.clientX, overSince = 0, holdTimer = 0, strainTimer = 0;
+  const calc = (ev) => {
+    const sc = fxScale(c);
+    if (anchor) return clampN(anchor.v + ((ev.clientX - anchor.x) / box.width) * sc, 0, sc);   // 破れたあとは、そこからの動きの分だけ変える
+    return clampN((ev.clientX - box.left) / box.width, 0, 1) * sc;
+  };
+  const cancelHold = () => { overSince = 0; clearTimeout(holdTimer); clearTimeout(strainTimer); sl.classList.remove("strain"); };
+  const apply = (ev) => {
+    lastX = ev.clientX;
+    setFxVal(c, Math.round(calc(ev)));
+    const over = c.unlocked ? 0 : Math.max(0, ev.clientX - box.right);
+    if (over > 0) {
+      if (!overSince) {
+        overSince = performance.now();
+        strainTimer = setTimeout(() => sl.classList.add("strain"), 350);
+        holdTimer = setTimeout(() => {
+          c.unlocked = true;
+          anchor = { x: lastX, v: fxVal(c) };
+          sl.classList.remove("strain"); sl.classList.add("tear");
+          setTimeout(() => sl.classList.remove("tear"), 700);
+          if (navigator.vibrate) navigator.vibrate(40);
+          paintFx(c, 0);
+        }, 1000);
+      }
+      paintFx(c, 26 * (1 - Math.exp(-over / 40)));   // 引っ張った分だけ、少し伸びる(だんだん伸びにくくなる)
+    } else {
+      if (overSince) cancelHold();
+      paintFx(c, 0);
+    }
+  };
+  const up = () => {
+    sl.removeEventListener("pointermove", apply); sl.removeEventListener("pointerup", up); sl.removeEventListener("pointercancel", up);
+    cancelHold();
+    sl.classList.remove("drag");
+    paintFx(c, 0);   // ゴムのように、元に戻る
+  };
+  sl.addEventListener("pointermove", apply);
+  sl.addEventListener("pointerup", up);
+  sl.addEventListener("pointercancel", up);
+  apply(e);
 });
 
 // ===== 通話バーを、動かす / 端へ投げてしまう(Slide Over のように) =====
@@ -1687,7 +1807,7 @@ function pullTab(e) {
   addEventListener("pointerup", up);
   addEventListener("pointercancel", up);
 }
-$("callBar").addEventListener("pointerdown", (e) => { if (!e.target.closest("button, input, a")) dragBar(e); });
+$("callBar").addEventListener("pointerdown", (e) => { if (!e.target.closest("button, input, a, .sl")) dragBar(e); });
 $("callX").addEventListener("click", () => { clearTimeout(endHide); if (!callSt) $("callBar").style.display = "none"; });
 $("callTab").addEventListener("pointerdown", pullTab);
 $("callGrip").addEventListener("dblclick", () => { try { localStorage.removeItem("callbar-pos"); } catch (e) {} placeBar(); });
